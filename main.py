@@ -1,126 +1,118 @@
+import os
 import logging
 import requests
-import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-from flask import Flask
-from threading import Thread
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
+)
 
-# Flask-сервер для UptimeRobot
-app_flask = Flask(__name__)
-@app_flask.route('/')
-def home():
-    return "Бот работает!"
+# Логирование
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def run():
-    app_flask.run(host='0.0.0.0', port=10000)
+# Переменные окружения
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-def keep_alive():
-    Thread(target=run).start()
+# Список доступных моделей
+AVAILABLE_MODELS = [
+    "openchat/openchat-3.5-0106:free",
+    "meta-llama/llama-3-8b-instruct:free",
+    "mistralai/mixtral-8x7b-instruct:free",
+    "google/gemma-7b-it:free",
+    "huggingfaceh4/zephyr-7b-beta:free"
+]
 
-# Контекстный чат
-user_histories = {}
+# Контекст для каждого пользователя
+user_context = {}
 
-# Модель по умолчанию
-DEFAULT_MODEL = "mistralai/mistral-7b-instruct:free"
+# Текущая модель для каждого пользователя
+user_model = {}
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я Telegram-бот. Напиши мне или упомяни в группе.")
+    await update.message.reply_text("Привет! Напиши сообщение или выбери модель с помощью /model")
 
-# Выбор модели пользователем
+# Команда /model — выбор модели
 async def choose_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("Mistral", callback_data="mistralai/mistral-7b-instruct:free")],
-        [InlineKeyboardButton("Gemma", callback_data="google/gemma-7b-it:free")],
-        [InlineKeyboardButton("DeepSeek", callback_data="deepseek/deepseek-chat:free")]
+    buttons = [
+        [InlineKeyboardButton(model.split("/")[-1], callback_data=f"model:{model}")]
+        for model in AVAILABLE_MODELS
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Выбери модель:", reply_markup=reply_markup)
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await update.message.reply_text("Выберите модель:", reply_markup=reply_markup)
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Обработка выбора модели
+async def handle_model_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    model = query.data
+
+    model = query.data.split("model:")[1]
     user_id = query.from_user.id
-    context.user_data["model"] = model
-    await query.edit_message_text(f"✅ Модель установлена: {model.split('/')[-1].split(':')[0]}")
+    user_model[user_id] = model
+    await query.edit_message_text(f"Модель установлена: {model.split('/')[-1]}")
 
-# Ответ на сообщения
+# Проверка: нужно ли боту отвечать
+def should_respond(update: Update, bot_username: str) -> bool:
+    msg = update.message
+    if msg is None:
+        return False
+    if msg.chat.type == "private":
+        return True
+    if msg.reply_to_message and msg.reply_to_message.from_user.username == bot_username:
+        return True
+    if f"@{bot_username}" in msg.text:
+        return True
+    return False
+
+# Обработка сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message:
-        return
-
-    is_group = update.effective_chat.type in ["group", "supergroup"]
-    is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.username == context.bot.username
-    mentioned = context.bot.username.lower() in message.text.lower()
-
-    if is_group and not (is_reply_to_bot or mentioned):
+    bot_username = (await context.bot.get_me()).username
+    if not should_respond(update, bot_username):
         return
 
     user_id = update.effective_user.id
     user_text = update.message.text.strip()
 
-    model = context.user_data.get("model", DEFAULT_MODEL)
-    history = user_histories.get(user_id, [])
-    history.append({"role": "user", "content": user_text})
-    if len(history) > 10:
-        history = history[-10:]
+    # Устанавливаем модель, если не выбрана
+    model = user_model.get(user_id, "deepseek/deepseek-chat:free")
 
+    # Получаем историю диалога
+    history = user_context.get(user_id, [])
+    history.append({"role": "user", "content": user_text})
+
+    # Запрос к OpenRouter
     headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENROUTER_API_KEY')}",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
-
-    data = {
+    payload = {
         "model": model,
         "messages": history
     }
 
     try:
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
-        json_response = response.json()
-        reply = json_response["choices"][0]["message"]["content"]
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+        result = response.json()
+        if "choices" not in result:
+            raise Exception(result.get("error", {}).get("message", "Неизвестная ошибка"))
+        reply = result["choices"][0]["message"]["content"]
         history.append({"role": "assistant", "content": reply})
-        user_histories[user_id] = history
+        user_context[user_id] = history[-10:]  # Обрезаем до последних 10 сообщений
+        await update.message.reply_text(reply)
     except Exception as e:
-        reply = "Извините, произошла ошибка при обработке вашего запроса."
-
-    await update.message.reply_text(reply)
+        logger.error(f"Ошибка: {e}")
+        await update.message.reply_text("Извините, произошла ошибка при обработке вашего запроса.")
 
 # Запуск
 if __name__ == '__main__':
-    keep_alive()
-    logging.basicConfig(level=logging.INFO)
-    app = ApplicationBuilder().token(os.environ.get("TELEGRAM_BOT_TOKEN")).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("model", choose_model))
+    app.add_handler(CallbackQueryHandler(handle_model_selection))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.ALL, handle_message))
-    app.add_handler(MessageHandler(filters.StatusUpdate.ALL, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.MESSAGE, handle_message))
-    app.add_handler(MessageHandler(filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.TEXT, handle_message))
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.MESSAGE, handle_message))
-    app.add_handler(MessageHandler(filters.TEXT & filters.UpdateType.MESSAGE, handle_message))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ALL, handle_message))
-    app.add_handler(MessageHandler(filters.TEXT, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.EDITED_CHANNEL_POST, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.INLINE_QUERY, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.CHOSEN_INLINE_RESULT, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.CALLBACK_QUERY, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.SHIPPING_QUERY, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.PRE_CHECKOUT_QUERY, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.POLL, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.POLL_ANSWER, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.MY_CHAT_MEMBER, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.CHAT_MEMBER, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.CHAT_JOIN_REQUEST, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.MESSAGE, handle_message))
-    app.add_handler(MessageHandler(filters.UpdateType.CALLBACK_QUERY, button_handler))
-    print("Бот запускается...")
+
+    print("Бот запущен!")
     app.run_polling()
+
