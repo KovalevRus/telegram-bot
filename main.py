@@ -1,6 +1,6 @@
 import logging
 import os
-import requests
+import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+
+if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY or not RENDER_EXTERNAL_URL:
+    logger.error("Отсутствуют необходимые переменные окружения: TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, RENDER_EXTERNAL_URL")
+    exit(1)
 
 MODELS = {
     "deepseek": "deepseek/deepseek-r1:free",
@@ -63,7 +67,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text="Неизвестная команда.")
 
 
-MAX_MESSAGE_LENGTH = 1500
+async def query_openrouter(history, model_id):
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": model_id,
+        "messages": history
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        return result['choices'][0]['message']['content']
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,25 +110,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(user_contexts[user_id]["history"]) > 10:
         user_contexts[user_id]["history"].pop(0)
 
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": model_id,
-        "messages": user_contexts[user_id]["history"]
-    }
-
     try:
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
-        response.raise_for_status()
-        result = response.json()
-        reply_text = result['choices'][0]['message']['content']
+        reply_text = await query_openrouter(user_contexts[user_id]["history"], model_id)
         if not reply_text.strip():
             reply_text = "Ответ пуст. Пожалуйста, повторите вопрос."
         user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
     except Exception as e:
-        logger.error(f"Ошибка при запросе к OpenRouter: {e} | Ответ: {response.text if 'response' in locals() else 'нет ответа'}")
+        logger.error(f"Ошибка при запросе к OpenRouter: {e}")
         reply_text = "Извините, произошла ошибка при обработке вашего запроса."
 
     await update.message.reply_text(reply_text)
