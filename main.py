@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")  # обязательно в Render
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
 MODELS = {
     "deepseek": "deepseek/deepseek-r1:free",
@@ -120,15 +120,16 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Запуск webhook (вместо polling)
-    webhook_path = f"/webhook/{TELEGRAM_BOT_TOKEN}"
-    webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
+    async def main():
+        # Устанавливаем webhook вручную
+        webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+        await app.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook установлен: {webhook_url}")
+        await app.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.environ.get("PORT", 10000)),
+            url_path="/webhook",
+        )
 
-    logger.info(f"Запускаем webhook на {webhook_url}...")
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
-        webhook_path=webhook_path,
-        webhook_url=webhook_url,
-    )
+    import asyncio
+    asyncio.run(main())
