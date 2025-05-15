@@ -73,19 +73,24 @@ async def check_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = requests.get(url, headers=headers)
-        text = response.text
-        logger.info(f"Ответ API по лимиту: {text}")
+        logger.info(f"HTTP статус: {response.status_code}")
+        logger.info(f"Ответ API по лимиту: {response.text}")
+
+        if response.status_code != 200:
+            await update.message.reply_text(f"Ошибка запроса: HTTP {response.status_code}\n{response.text}")
+            return
 
         data = response.json()
         if "credits" in data:
             credits = data["credits"]
             await update.message.reply_text(f"Ваш текущий лимит кредитов: {credits}")
         else:
-            await update.message.reply_text(f"Не удалось получить лимит. Ответ сервера: {text}")
+            await update.message.reply_text(f"Не удалось получить лимит. Ответ сервера: {response.text}")
 
     except Exception as e:
         logger.error(f"Ошибка при запросе лимита: {e}")
         await update.message.reply_text(f"Ошибка при запросе лимита: {e}")
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
