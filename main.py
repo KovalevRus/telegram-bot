@@ -1,118 +1,169 @@
-import os
 import logging
 import requests
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, filters
+    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 )
 
-# Логирование
+# Токены из переменных окружения
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Переменные окружения
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# Словарь для хранения истории сообщений по chat_id + user_id
+# Формат: {(chat_id, user_id): [{"role": "user", "content": "..."} , ...]}
+dialog_contexts = {}
 
-# Список доступных моделей
-AVAILABLE_MODELS = [
-    "openchat/openchat-3.5-0106:free",
-    "meta-llama/llama-3-8b-instruct:free",
-    "mistralai/mixtral-8x7b-instruct:free",
-    "google/gemma-7b-it:free",
-    "huggingfaceh4/zephyr-7b-beta:free"
-]
+# Поддерживаемые модели
+MODELS = {
+    "deepseek": "deepseek/deepseek-r1:free",
+    "gpt4all": "gpt4all/gpt4all-lora-quantized",
+    "chatgpt": "openai/gpt-4o-mini",
+}
 
-# Контекст для каждого пользователя
-user_context = {}
+# Хранение выбора модели для каждого пользователя (chat_id, user_id)
+user_models = {}
 
-# Текущая модель для каждого пользователя
-user_model = {}
+# Максимальное количество сообщений в контексте для экономии лимита
+MAX_CONTEXT_MESSAGES = 6
 
-# Команда /start
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Напиши сообщение или выбери модель с помощью /model")
+    await update.message.reply_text(
+        "Привет! Я бот на базе DeepSeek R1.\n"
+        "Команда /model — выбрать модель.\n"
+        "Команда /лимит — проверить баланс.\n"
+        "Чтобы поговорить, упоминайте меня словом 'дипсик' или отвечайте на моё сообщение."
+    )
 
-# Команда /model — выбор модели
-async def choose_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    buttons = [
-        [InlineKeyboardButton(model.split("/")[-1], callback_data=f"model:{model}")]
-        for model in AVAILABLE_MODELS
+
+async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("DeepSeek R1", callback_data="model_deepseek")],
+        [InlineKeyboardButton("GPT4All", callback_data="model_gpt4all")],
+        [InlineKeyboardButton("ChatGPT 4o-mini", callback_data="model_chatgpt")],
     ]
-    reply_markup = InlineKeyboardMarkup(buttons)
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Выберите модель:", reply_markup=reply_markup)
 
-# Обработка выбора модели
-async def handle_model_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def model_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    data = query.data
 
-    model = query.data.split("model:")[1]
+    chat_id = query.message.chat_id
     user_id = query.from_user.id
-    user_model[user_id] = model
-    await query.edit_message_text(f"Модель установлена: {model.split('/')[-1]}")
 
-# Проверка: нужно ли боту отвечать
-def should_respond(update: Update, bot_username: str) -> bool:
-    msg = update.message
-    if msg is None:
-        return False
-    if msg.chat.type == "private":
+    if data.startswith("model_"):
+        model_key = data.split("_", 1)[1]
+        if model_key in MODELS:
+            user_models[(chat_id, user_id)] = MODELS[model_key]
+            await query.edit_message_text(f"Модель успешно установлена: {model_key}")
+        else:
+            await query.edit_message_text("Неизвестная модель.")
+    else:
+        await query.edit_message_text("Неизвестная команда.")
+
+
+async def check_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
+    try:
+        response = requests.get("https://openrouter.ai/api/v1/dashboard/billing", headers=headers)
+        data = response.json()
+        credits = data.get("credits_remaining")
+        if credits is not None:
+            await update.message.reply_text(f"Текущий баланс кредитов: {credits}")
+        else:
+            await update.message.reply_text("Не удалось получить информацию о балансе.")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при запросе лимита: {e}")
+
+
+def is_bot_mentioned(update: Update) -> bool:
+    message = update.message
+    # Проверяем, есть ли упоминание "дипсик" в тексте (регистр неважен)
+    if message.entities:
+        for ent in message.entities:
+            if ent.type == "mention":
+                # Получаем упоминание из текста
+                mention_text = message.text[ent.offset : ent.offset + ent.length].lower()
+                if "дипсик" in mention_text:
+                    return True
+    # Альтернатива — ищем слово в тексте просто
+    if message.text and "дипсик" in message.text.lower():
         return True
-    if msg.reply_to_message and msg.reply_to_message.from_user.username == bot_username:
-        return True
-    if f"@{bot_username}" in msg.text:
+    # Проверяем, ответ ли это на сообщение бота
+    if message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id:
         return True
     return False
 
-# Обработка сообщений
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bot_username = (await context.bot.get_me()).username
-    if not should_respond(update, bot_username):
+    message = update.message
+    if message is None or message.text is None:
+        return  # Игнорируем другие типы сообщений
+
+    # Отвечаем только если есть упоминание или ответ на бота
+    if not (("дипсик" in message.text.lower()) or
+            (message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id)):
         return
 
-    user_id = update.effective_user.id
-    user_text = update.message.text.strip()
+    chat_id = message.chat_id
+    user_id = message.from_user.id
+    user_key = (chat_id, user_id)
 
-    # Устанавливаем модель, если не выбрана
-    model = user_model.get(user_id, "deepseek/deepseek-chat:free")
+    # Получаем выбранную пользователем модель, или дефолтную
+    model = user_models.get(user_key, MODELS["deepseek"])
 
-    # Получаем историю диалога
-    history = user_context.get(user_id, [])
-    history.append({"role": "user", "content": user_text})
+    # Инициализируем контекст, если нет
+    if user_key not in dialog_contexts:
+        dialog_contexts[user_key] = []
 
-    # Запрос к OpenRouter
+    # Добавляем новое сообщение пользователя в контекст
+    dialog_contexts[user_key].append({"role": "user", "content": message.text})
+
+    # Ограничиваем длину контекста
+    if len(dialog_contexts[user_key]) > MAX_CONTEXT_MESSAGES:
+        dialog_contexts[user_key] = dialog_contexts[user_key][-MAX_CONTEXT_MESSAGES:]
+
+    # Формируем запрос
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
-    payload = {
+    data = {
         "model": model,
-        "messages": history
+        "messages": dialog_contexts[user_key]
     }
 
     try:
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
         result = response.json()
-        if "choices" not in result:
-            raise Exception(result.get("error", {}).get("message", "Неизвестная ошибка"))
-        reply = result["choices"][0]["message"]["content"]
-        history.append({"role": "assistant", "content": reply})
-        user_context[user_id] = history[-10:]  # Обрезаем до последних 10 сообщений
-        await update.message.reply_text(reply)
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await update.message.reply_text("Извините, произошла ошибка при обработке вашего запроса.")
 
-# Запуск
-if __name__ == '__main__':
+        if "choices" in result and len(result["choices"]) > 0:
+            reply = result["choices"][0]["message"]["content"]
+            # Добавляем ответ бота в контекст
+            dialog_contexts[user_key].append({"role": "assistant", "content": reply})
+            await message.reply_text(reply)
+        else:
+            logging.error(f"Нет 'choices' в ответе API: {result}")
+            await message.reply_text("Извините, произошла ошибка при обработке вашего запроса.")
+    except Exception as e:
+        logging.error(f"Ошибка при запросе к API: {e}")
+        await message.reply_text("Извините, произошла ошибка при обработке вашего запроса.")
+
+
+if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("model", choose_model))
-    app.add_handler(CallbackQueryHandler(handle_model_selection))
+    app.add_handler(CommandHandler("model", set_model))
+    app.add_handler(CallbackQueryHandler(model_button))
+    app.add_handler(CommandHandler("лимит", check_limit))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("Бот запущен!")
     app.run_polling()
-
