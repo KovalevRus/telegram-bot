@@ -65,6 +65,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text(text="Неизвестная команда.")
 
+MAX_MESSAGE_LENGTH = 1500  # можно менять по желанию
+
 async def check_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not OPENROUTER_API_KEY:
         await update.message.reply_text("API ключ OpenRouter не установлен.")
@@ -80,18 +82,21 @@ async def check_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if response.status_code != 200:
             await update.message.reply_text(
                 f"Ошибка запроса к OpenRouter API. HTTP {response.status_code}.\n"
-                f"Ответ сервера: {response.text}"
+                f"Ответ сервера: {response.text[:MAX_MESSAGE_LENGTH]}"
             )
             return
 
         data = response.json()
-        # Пример вывода всей информации по ключу с отступами
         pretty = "\n".join([f"{k}: {v}" for k, v in data.items()])
+        # Ограничиваем длину сообщения
+        if len(pretty) > MAX_MESSAGE_LENGTH:
+            pretty = pretty[:MAX_MESSAGE_LENGTH] + "\n\n[текст обрезан...]"
         await update.message.reply_text(f"Информация по API ключу:\n{pretty}")
 
     except Exception as e:
         logger.error(f"Ошибка при запросе лимита: {e}")
         await update.message.reply_text(f"Ошибка при запросе лимита: {e}")
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
