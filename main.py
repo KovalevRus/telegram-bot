@@ -1,6 +1,6 @@
 import logging
 import os
-import httpx
+import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,17 +10,14 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
+from aiohttp import web
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
-
-if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY or not RENDER_EXTERNAL_URL:
-    logger.error("Отсутствуют необходимые переменные окружения: TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, RENDER_EXTERNAL_URL")
-    exit(1)
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")  # например https://yourapp.onrender.com
 
 MODELS = {
     "deepseek": "deepseek/deepseek-r1:free",
@@ -67,20 +64,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text="Неизвестная команда.")
 
 
-async def query_openrouter(history, model_id):
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": model_id,
-        "messages": history
-    }
-    async with httpx.AsyncClient() as client:
-        response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
-        response.raise_for_status()
-        result = response.json()
-        return result['choices'][0]['message']['content']
+MAX_MESSAGE_LENGTH = 1500
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -110,47 +94,93 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(user_contexts[user_id]["history"]) > 10:
         user_contexts[user_id]["history"].pop(0)
 
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": model_id,
+        "messages": user_contexts[user_id]["history"]
+    }
+
     try:
-        reply_text = await query_openrouter(user_contexts[user_id]["history"], model_id)
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
+        response.raise_for_status()
+        result = response.json()
+        reply_text = result['choices'][0]['message']['content']
         if not reply_text.strip():
             reply_text = "Ответ пуст. Пожалуйста, повторите вопрос."
         user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
     except Exception as e:
-        logger.error(f"Ошибка при запросе к OpenRouter: {e}")
+        logger.error(f"Ошибка при запросе к OpenRouter: {e} | Ответ: {response.text if 'response' in locals() else 'нет ответа'}")
         reply_text = "Извините, произошла ошибка при обработке вашего запроса."
 
     await update.message.reply_text(reply_text)
 
 
-import asyncio
+# --- AIOHTTP + telegram webhook integration ---
+
+async def handle_webhook(request):
+    """Обработчик POST /webhook для Telegram webhook."""
+    app = request.app['telegram_app']
+    data = await request.json()
+    update = Update.de_json(data, app.bot)
+    await app.update_queue.put(update)
+    return web.Response(text="OK")
+
+
+async def on_startup(app):
+    logger.info("Webhook bot starting up...")
+    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
+    await app['telegram_app'].bot.delete_webhook()
+    await app['telegram_app'].bot.set_webhook(webhook_url)
+    logger.info(f"Webhook установлен: {webhook_url}")
+
+
+async def on_cleanup(app):
+    logger.info("Webhook bot shutting down...")
+    await app['telegram_app'].bot.delete_webhook()
+
+
+def main():
+    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CallbackQueryHandler(button_handler))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Создаем aiohttp приложение
+    app = web.Application()
+    app['telegram_app'] = telegram_app
+    app.router.add_post('/webhook', handle_webhook)
+
+    app.on_startup.append(lambda app: on_startup(app))
+    app.on_cleanup.append(lambda app: on_cleanup(app))
+
+    # Запускаем telegram_app в фоне (метод initialize запускает update_queue)
+    async def start_telegram_app():
+        await telegram_app.initialize()
+        await telegram_app.start()
+        await telegram_app.updater.start_polling()  # НЕ НАДО polling, надо убрать эту строку!
+        # Убери или закомментируй строку выше, чтобы не запускать polling
+
+    # Запускаем приложение aiohttp и telegram_app в одном loop
+    import asyncio
+
+    async def runner():
+        await telegram_app.initialize()
+        await telegram_app.start()
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
+        await site.start()
+        logger.info("====== Webhook сервер запущен ======")
+        # бесконечный цикл, чтобы приложение не завершалось
+        while True:
+            await asyncio.sleep(3600)
+
+    asyncio.run(runner())
+
 
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    async def main():
-        # Удаляем старый webhook, чтобы избежать конфликта
-        await app.bot.delete_webhook()
-
-        webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
-        await app.bot.set_webhook(webhook_url)
-        logger.info(f"Webhook установлен: {webhook_url}")
-
-        await app.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.environ.get("PORT", 10000)),
-            url_path="/webhook",
-        )
-
-    try:
-        asyncio.run(main())
-    except RuntimeError as e:
-        if "event loop is running" in str(e):
-            loop = asyncio.get_event_loop()
-            loop.create_task(main())
-            loop.run_forever()
-        else:
-            raise
+    main()
