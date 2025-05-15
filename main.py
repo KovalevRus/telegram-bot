@@ -120,16 +120,17 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    import asyncio
+
     async def main():
-        # Устанавливаем webhook вручную
         webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
         await app.bot.set_webhook(webhook_url)
         logger.info(f"Webhook установлен: {webhook_url}")
+
         await app.run_webhook(
             listen="0.0.0.0",
             port=int(os.environ.get("PORT", 10000)),
             url_path="/webhook",
         )
 
-    import asyncio
     asyncio.run(main())
