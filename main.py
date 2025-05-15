@@ -1,7 +1,8 @@
 import logging
 import os
 import requests
-import datetime
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -31,6 +32,21 @@ user_contexts = {}
 # Выбор модели по умолчанию
 DEFAULT_MODEL = "deepseek"
 
+# --- HTTP сервер, чтобы Render не ругался на отсутствие порта ---
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is running\n")
+
+def run_http_server():
+    server = HTTPServer(("0.0.0.0", 8080), SimpleHandler)
+    logger.info("HTTP server started on port 8080")
+    server.serve_forever()
+
+# ---------------------------------------------------------------
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("DeepSeek R1", callback_data="model_deepseek")],
@@ -59,7 +75,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_contexts[user_id] = {"model": chosen, "history": []}
             else:
                 user_contexts[user_id]["model"] = chosen
-                # **Не очищаем историю при смене модели, сохраняем контекст**
+                # Не очищаем историю при смене модели
             await query.edit_message_text(text=f"Вы выбрали модель: {chosen}")
         else:
             await query.edit_message_text(text="Неизвестная модель.")
@@ -77,23 +93,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # В группе — отвечаем только если упомянут бот или ответ на его сообщение
         if not (update.message.entities or update.message.reply_to_message):
             return
-        # Можно улучшить проверку упоминания бота (сейчас просто проверим в тексте "дипсик")
         if "дипсик" not in user_text.lower() and not (
             update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
         ):
             return
 
-    # Если пользователь новый, инициализируем данные
     if user_id not in user_contexts:
         user_contexts[user_id] = {"model": DEFAULT_MODEL, "history": []}
 
     model_name = user_contexts[user_id]["model"]
     model_id = MODELS.get(model_name, DEFAULT_MODEL)
 
-    # Добавляем в историю контекста
     user_contexts[user_id]["history"].append({"role": "user", "content": user_text})
 
-    # Ограничим длину истории, чтобы не перегружать запрос (например, последние 10 сообщений)
     if len(user_contexts[user_id]["history"]) > 10:
         user_contexts[user_id]["history"].pop(0)
 
@@ -113,7 +125,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply_text = result['choices'][0]['message']['content']
 
-        # Добавляем ответ модели в историю
         user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
 
     except Exception as e:
@@ -122,8 +133,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(reply_text)
 
-
 if __name__ == "__main__":
+    # Запускаем HTTP сервер в отдельном потоке
+    threading.Thread(target=run_http_server, daemon=True).start()
+
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
