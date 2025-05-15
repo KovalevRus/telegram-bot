@@ -58,7 +58,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_contexts[user_id] = {"model": chosen, "history": []}
             else:
                 user_contexts[user_id]["model"] = chosen
-                user_contexts[user_id]["history"] = []  # очищаем историю при смене модели
+                # НЕ ОЧИЩАЕМ историю — сохраняем весь контекст
             await query.edit_message_text(text=f"Вы выбрали модель: {chosen}")
         else:
             await query.edit_message_text(text="Неизвестная модель.")
@@ -86,23 +86,6 @@ async def check_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при запросе лимита: {e}")
         await update.message.reply_text(f"Ошибка при запросе лимита: {e}")
-
-def message_is_for_bot(update: Update) -> bool:
-    msg = update.message
-    # Личка — всегда отвечаем
-    if msg.chat.type == "private":
-        return True
-    # В группе — отвечаем, если упомянут @username бота или ответ на сообщение бота
-    if msg.entities:
-        for entity in msg.entities:
-            if entity.type == "mention":
-                mentioned = msg.text[entity.offset : entity.offset + entity.length]
-                if mentioned.lower() == f"@{context.bot.username.lower()}":
-                    return True
-    if msg.reply_to_message:
-        if msg.reply_to_message.from_user.id == msg.bot.id:
-            return True
-    return False
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
