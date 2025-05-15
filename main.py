@@ -27,6 +27,7 @@ MODELS = {
 user_contexts = {}
 DEFAULT_MODEL = "deepseek"
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("DeepSeek R1", callback_data="model_deepseek")],
@@ -41,6 +42,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я бот на базе OpenRouter. Выбери модель ИИ:", reply_markup=reply_markup
     )
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -60,7 +62,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text(text="Неизвестная команда.")
 
+
 MAX_MESSAGE_LENGTH = 1500
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -113,6 +117,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(reply_text)
 
 
+import asyncio
+
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -120,9 +126,10 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    import asyncio
-
     async def main():
+        # Удаляем старый webhook, чтобы избежать конфликта
+        await app.bot.delete_webhook()
+
         webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
         await app.bot.set_webhook(webhook_url)
         logger.info(f"Webhook установлен: {webhook_url}")
@@ -133,4 +140,12 @@ if __name__ == "__main__":
             url_path="/webhook",
         )
 
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "event loop is running" in str(e):
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+            loop.run_forever()
+        else:
+            raise
