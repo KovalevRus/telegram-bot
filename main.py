@@ -68,70 +68,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 MAX_MESSAGE_LENGTH = 1500  # можно менять по желанию
 
-async def check_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = "https://openrouter.ai/api/v1/auth/key"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}"
-    }
-
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        # Пример структуры data:
-        # {
-        #   "label": "...",
-        #   "limit": None or число,
-        #   "limit_remaining": число или None,
-        #   "usage": число,
-        #   "rate_limit": {"requests": 10, "interval": "10s"},
-        #   ...
-        # }
-
-        limit = data.get("limit")
-        limit_remaining = data.get("limit_remaining")
-        rate_limit = data.get("rate_limit", {})
-        interval = rate_limit.get("interval")
-
-        if limit_remaining is None:
-            await update.message.reply_text("Информация о лимите недоступна.")
-            return
-
-        # Если interval указан в формате "10s", "1m", "1h" — преобразуем в человекочитаемое время обновления
-        interval_seconds = None
-        if interval:
-            # Простая конвертация интервала в секунды
-            unit = interval[-1]
-            number = interval[:-1]
-            if number.isdigit():
-                number = int(number)
-                if unit == 's':
-                    interval_seconds = number
-                elif unit == 'm':
-                    interval_seconds = number * 60
-                elif unit == 'h':
-                    interval_seconds = number * 3600
-
-        if interval_seconds:
-            update_time = datetime.datetime.now() + datetime.timedelta(seconds=interval_seconds)
-            update_time_str = update_time.strftime("%H:%M:%S")
-            await update.message.reply_text(
-                f"На сегодняшний день осталось {limit_remaining} запросов.\n"
-                f"Лимит обновится примерно в {update_time_str}."
-            )
-        else:
-            await update.message.reply_text(
-                f"На сегодняшний день осталось {limit_remaining} запросов.\n"
-                f"Интервал обновления лимита не указан."
-            )
-
-    except Exception as e:
-        logger.error(f"Ошибка при запросе лимита: {e}")
-        await update.message.reply_text(f"Информация о лимите недоступна.")
-
-
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text.strip()
@@ -191,7 +127,6 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("limit", check_limit))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
