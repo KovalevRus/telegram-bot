@@ -107,15 +107,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
         response.raise_for_status()
         result = response.json()
-        reply_text = result['choices'][0]['message']['content']
-        if not reply_text.strip():
-            reply_text = "Ответ пуст. Пожалуйста, повторите вопрос."
-        user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
+
+        if "error" in result:
+            error_message = result["error"].get("message", "Неизвестная ошибка от OpenRouter.")
+            if result["error"].get("code") == 429:
+                reply_text = "🚫 Превышен лимит бесплатных запросов к OpenRouter. Попробуйте позже или пополните баланс."
+            else:
+                reply_text = f"Ошибка от OpenRouter: {error_message}"
+        else:
+            reply_text = result["choices"][0]["message"]["content"]
+            if not reply_text.strip():
+                reply_text = "Ответ пуст. Пожалуйста, повторите вопрос."
+            else:
+                user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
+
     except Exception as e:
         logger.error(f"Ошибка при запросе к OpenRouter: {e} | Ответ: {response.text if 'response' in locals() else 'нет ответа'}")
         reply_text = "Извините, произошла ошибка при обработке вашего запроса."
 
     await update.message.reply_text(reply_text)
+
 
 
 # --- AIOHTTP + telegram webhook integration ---
