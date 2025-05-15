@@ -58,7 +58,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_contexts[user_id] = {"model": chosen, "history": []}
             else:
                 user_contexts[user_id]["model"] = chosen
-                # НЕ ОЧИЩАЕМ историю — сохраняем весь контекст
+                # **Не очищаем историю при смене модели, сохраняем контекст**
             await query.edit_message_text(text=f"Вы выбрали модель: {chosen}")
         else:
             await query.edit_message_text(text="Неизвестная модель.")
@@ -66,31 +66,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text="Неизвестная команда.")
 
 async def check_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = "https://openrouter.ai/api/v1/users/me"
+    if not OPENROUTER_API_KEY:
+        await update.message.reply_text("API ключ OpenRouter не установлен.")
+        return
+
+    url = "https://openrouter.ai/api/v1/auth/key"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}"
     }
 
     try:
         response = requests.get(url, headers=headers)
-        logger.info(f"HTTP статус: {response.status_code}")
-        logger.info(f"Ответ API по лимиту: {response.text}")
-
         if response.status_code != 200:
-            await update.message.reply_text(f"Ошибка запроса: HTTP {response.status_code}\n{response.text}")
+            await update.message.reply_text(
+                f"Ошибка запроса к OpenRouter API. HTTP {response.status_code}.\n"
+                f"Ответ сервера: {response.text}"
+            )
             return
 
         data = response.json()
-        if "credits" in data:
-            credits = data["credits"]
-            await update.message.reply_text(f"Ваш текущий лимит кредитов: {credits}")
-        else:
-            await update.message.reply_text(f"Не удалось получить лимит. Ответ сервера: {response.text}")
+        # Пример вывода всей информации по ключу с отступами
+        pretty = "\n".join([f"{k}: {v}" for k, v in data.items()])
+        await update.message.reply_text(f"Информация по API ключу:\n{pretty}")
 
     except Exception as e:
         logger.error(f"Ошибка при запросе лимита: {e}")
         await update.message.reply_text(f"Ошибка при запросе лимита: {e}")
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -102,7 +103,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not (update.message.entities or update.message.reply_to_message):
             return
         # Можно улучшить проверку упоминания бота (сейчас просто проверим в тексте "дипсик")
-        if "дипсик" not in user_text.lower() and not (update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id):
+        if "дипсик" not in user_text.lower() and not (
+            update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
+        ):
             return
 
     # Если пользователь новый, инициализируем данные
