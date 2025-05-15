@@ -162,7 +162,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("model", set_model))
     app.add_handler(CallbackQueryHandler(model_button))
-    app.add_handler(CommandHandler("лимит", check_limit))
+    app.add_handler(CommandHandler("limit", check_limit))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("Бот запущен!")
