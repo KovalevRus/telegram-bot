@@ -82,20 +82,34 @@ async def check_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if response.status_code != 200:
             await update.message.reply_text(
                 f"Ошибка запроса к OpenRouter API. HTTP {response.status_code}.\n"
-                f"Ответ сервера: {response.text[:MAX_MESSAGE_LENGTH]}"
+                f"Ответ сервера: {response.text[:1500]}"
             )
             return
 
         data = response.json()
-        pretty = "\n".join([f"{k}: {v}" for k, v in data.items()])
-        # Ограничиваем длину сообщения
-        if len(pretty) > MAX_MESSAGE_LENGTH:
-            pretty = pretty[:MAX_MESSAGE_LENGTH] + "\n\n[текст обрезан...]"
-        await update.message.reply_text(f"Информация по API ключу:\n{pretty}")
+
+        remaining = data.get("limit_remaining")
+        rate_limit = data.get("rate_limit", {})
+        requests_limit = rate_limit.get("requests")
+        interval = rate_limit.get("interval")
+
+        if remaining is None and requests_limit is None:
+            await update.message.reply_text("Информация о лимите недоступна.")
+            return
+
+        if remaining is None:
+            remaining = requests_limit
+
+        msg = f"На сегодняшний день осталось {remaining} запросов."
+        if interval:
+            msg += f" Лимит обновится каждые {interval}."
+
+        await update.message.reply_text(msg)
 
     except Exception as e:
         logger.error(f"Ошибка при запросе лимита: {e}")
         await update.message.reply_text(f"Ошибка при запросе лимита: {e}")
+
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
