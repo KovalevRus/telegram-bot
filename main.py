@@ -1,6 +1,8 @@
 import logging
 import os
 import requests
+import datetime
+import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -90,7 +92,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model_id = MODELS.get(model_name, DEFAULT_MODEL)
 
     user_contexts[user_id]["history"].append({"role": "user", "content": user_text})
-
     if len(user_contexts[user_id]["history"]) > 10:
         user_contexts[user_id]["history"].pop(0)
 
@@ -108,18 +109,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response.raise_for_status()
         result = response.json()
 
-        if "error" in result:
-            error_message = result["error"].get("message", "Неизвестная ошибка от OpenRouter.")
-            if result["error"].get("code") == 429:
-                reply_text = "🚫 Превышен лимит бесплатных запросов к OpenRouter. Попробуйте позже или пополните баланс."
+        if "choices" not in result:
+            error = result.get("error", {})
+            if error.get("code") == 429:
+                reset_ms = error.get("metadata", {}).get("headers", {}).get("X-RateLimit-Reset")
+                if reset_ms:
+                    utc_reset = datetime.datetime.utcfromtimestamp(int(reset_ms) / 1000)
+                    msk_tz = pytz.timezone("Europe/Moscow")
+                    msk_reset = utc_reset.replace(tzinfo=pytz.utc).astimezone(msk_tz)
+                    reset_str = msk_reset.strftime('%Y-%m-%d %H:%M:%S')
+                    reply_text = (
+                        "🚫 Превышен лимит бесплатных запросов к OpenRouter.\n"
+                        f"⏳ Лимит обновится по МСК: {reset_str}."
+                    )
+                else:
+                    reply_text = "🚫 Превышен лимит бесплатных запросов к OpenRouter. Попробуйте позже."
             else:
-                reply_text = f"Ошибка от OpenRouter: {error_message}"
+                reply_text = "⚠️ Не удалось получить ответ от модели. Попробуйте позже."
         else:
             reply_text = result["choices"][0]["message"]["content"]
             if not reply_text.strip():
                 reply_text = "Ответ пуст. Пожалуйста, повторите вопрос."
-            else:
-                user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
+            user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
 
     except Exception as e:
         logger.error(f"Ошибка при запросе к OpenRouter: {e} | Ответ: {response.text if 'response' in locals() else 'нет ответа'}")
