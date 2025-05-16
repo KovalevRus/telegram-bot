@@ -87,7 +87,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model_id = MODELS.get(model_name, DEFAULT_MODEL)
 
     user_contexts[user_id]["history"].append({"role": "user", "content": user_text})
-    if len(user_contexts[user_id]["history"]) > 10:
+    if len(user_contexts[user_id]["history"]) > 6:
         user_contexts[user_id]["history"].pop(0)
 
     headers = {
@@ -123,9 +123,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_text = "⚠️ Не удалось получить ответ от модели. Попробуйте позже."
         else:
             reply_text = result["choices"][0]["message"]["content"]
+            logger.warning(f"Модель вернула пустой ответ. Full raw response: {result}")
             if not reply_text.strip():
                 reply_text = "Ответ пуст. Пожалуйста, повторите вопрос."
-            user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
+            else:
+                user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
+
 
     except Exception as e:
         logger.error(f"Ошибка при запросе к OpenRouter: {e} | Ответ: {response.text if 'response' in locals() else 'нет ответа'}")
