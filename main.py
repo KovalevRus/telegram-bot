@@ -1,144 +1,82 @@
 import os
-import logging
 import asyncio
+import logging
 from aiohttp import web
-from telegram import Update, Bot
-from telegram.ext import Application, ContextTypes, CommandHandler, MessageHandler, filters
+from telegram import Update
+from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
-import aiohttp
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-PORT = int(os.getenv("PORT", "8080"))
+PORT = int(os.getenv("PORT", 8000))
 WEBHOOK_PATH = "/webhook"
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
-if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
-    logger.error("TELEGRAM_BOT_TOKEN or OPENROUTER_API_KEY is not set in environment variables")
+if not TELEGRAM_BOT_TOKEN:
+    logger.error("TELEGRAM_BOT_TOKEN is not set in environment variables")
     exit(1)
 
-
-async def query_openrouter_with_retry(payload, headers, retries=2):
-    for attempt in range(retries):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                ) as response:
-                    result = await response.json()
-
-                    # Проверяем есть ли ошибка в ответе модели
-                    if result.get("choices") and result["choices"][0].get("error"):
-                        logger.warning("Ошибка OpenRouter: %s", result["choices"][0]["error"])
-                        await asyncio.sleep(1)
-                        continue
-
-                    return result
-        except Exception as e:
-            logger.warning("Ошибка запроса к OpenRouter: %s", e)
-            await asyncio.sleep(1)
-
-    # Возврат fallback-ответа при ошибках
-    return {
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": "Извините, сейчас возникли технические трудности, пожалуйста, повторите запрос позже."
-            }
-        }]
-    }
-
-
-async def ask_model(question: str):
-    payload = {
-        "model": "deepseek/deepseek-r1:free",
-        "messages": [{"role": "user", "content": question}],
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    response = await query_openrouter_with_retry(payload, headers)
-
-    content = response["choices"][0]["message"]["content"]
-    if not content.strip():
-        logger.warning("Модель вернула пустой ответ. Full raw response: %s", response)
-        return "Ответ пуст. Пожалуйста, повторите вопрос."
-    return content
-
-
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Получен апдейт: {update.to_dict()}")
+    logger.info(f"Получено сообщение: {update.message.text}")
+    # Пример ответа
+    await update.message.reply_text(f"Вы написали: {update.message.text}")
 
-    if update.message and update.message.text:
-        user_text = update.message.text
-        logger.info(f"Запрос от пользователя: {user_text}")
-
-        answer = await ask_model(user_text)
-        await update.message.reply_text(answer)
-    else:
-        logger.info("Получено сообщение без текста")
-
-
-async def handle_health(request):
+async def webhook_handler(request: web.Request):
+    data = await request.json()
+    telegram_app = request.app['telegram_app']
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.update_queue.put(update)
+    logger.info(f"Получен апдейт на /webhook: {data}")
     return web.Response(text="OK")
 
+async def health_handler(request: web.Request):
+    return web.Response(text="OK")
 
-async def on_startup(app):
-    logger.info("Webhook сервер запущен")
-
-
-def main():
+async def async_main():
+    # Создаем Telegram приложение
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
     telegram_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_update))
 
-    # Aiohttp web app
+    # Создаем aiohttp приложение
     app = web.Application()
-
-    # Webhook endpoint для Telegram
-    async def webhook_handler(request):
-        data = await request.json()
-        update = Update.de_json(data, telegram_app.bot)
-        await telegram_app.update_queue.put(update)
-        return web.Response(text="OK")
+    app['telegram_app'] = telegram_app
 
     app.router.add_post(WEBHOOK_PATH, webhook_handler)
-
-    # Для проверки здоровья сервиса (health check)
-    async def health_handler(request):
-        return web.Response(text="OK")
-
     app.router.add_get("/", health_handler)
 
-    # Запускаем webhook для telegram
     # Устанавливаем webhook
-    webhook_url = os.getenv("RENDER_EXTERNAL_URL")
-    if webhook_url:
-        full_webhook_url = f"{webhook_url}{WEBHOOK_PATH}"
-        logger.info(f"Setting webhook URL to: {full_webhook_url}")
-        asyncio.run(telegram_app.bot.set_webhook(full_webhook_url))
+    if RENDER_EXTERNAL_URL:
+        webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
+        logger.info(f"Устанавливаем webhook: {webhook_url}")
+        await telegram_app.bot.set_webhook(webhook_url)
     else:
-        logger.warning("RENDER_EXTERNAL_URL is not set, webhook won't be set automatically")
+        logger.warning("RENDER_EXTERNAL_URL не задан, webhook не будет установлен")
 
-    # Запускаем Telegram app и aiohttp сервер одновременно
-    loop = asyncio.get_event_loop()
-
-    # Запускаем Telegram приложение (оно работает в фоне)
-    loop.create_task(telegram_app.initialize())
-    loop.create_task(telegram_app.start())
-    loop.create_task(telegram_app.updater.start_polling())  # Подстраховка, на случай если webhook не работает
+    # Инициализируем и запускаем Telegram приложение
+    await telegram_app.initialize()
+    await telegram_app.start()
 
     # Запускаем aiohttp сервер
-    web.run_app(app, port=PORT)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, port=PORT)
+    await site.start()
 
+    logger.info(f"Webhook сервер запущен на порту {PORT}")
+
+    try:
+        while True:
+            await asyncio.sleep(3600)  # Просто спим, чтобы не завершать работу
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Завершение работы сервера")
+
+    await telegram_app.stop()
+    await telegram_app.shutdown()
+    await runner.cleanup()
+
+def main():
+    asyncio.run(async_main())
 
 if __name__ == "__main__":
     main()
