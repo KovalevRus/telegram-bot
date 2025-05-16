@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")  # например https://yourapp.onrender.com
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")  # e.g., https://yourapp.onrender.com
 
 MODELS = {
     "deepseek": "deepseek/deepseek-r1:free",
@@ -55,13 +55,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("model_"):
         chosen = query.data[len("model_"):]
         if chosen in MODELS:
-            user_contexts[user_id] = user_contexts.get(user_id, {"history": []})
-            user_contexts[user_id]["model"] = chosen
+            if user_id not in user_contexts:
+                user_contexts[user_id] = {"model": chosen, "history": []}
+            else:
+                user_contexts[user_id]["model"] = chosen
             await query.edit_message_text(text=f"Вы выбрали модель: {chosen}")
         else:
             await query.edit_message_text(text="Неизвестная модель.")
     else:
         await query.edit_message_text(text="Неизвестная команда.")
+
+
+MAX_MESSAGE_LENGTH = 1500
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -73,12 +78,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if update.message.chat.type != "private":
-        if not ("дипсик" in user_text.lower() or
-                update.message.reply_to_message or
-                any(e.type == "mention" for e in update.message.entities or [])):
+        if not (update.message.entities or update.message.reply_to_message):
             return
-
-    logger.info(f"Получено сообщение от {user_id}: {user_text}")
+        if "дипсик" not in user_text.lower() and not (
+            update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
+        ):
+            return
 
     if user_id not in user_contexts:
         user_contexts[user_id] = {"model": DEFAULT_MODEL, "history": []}
@@ -87,7 +92,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model_id = MODELS.get(model_name, DEFAULT_MODEL)
 
     user_contexts[user_id]["history"].append({"role": "user", "content": user_text})
-    if len(user_contexts[user_id]["history"]) > 6:
+    if len(user_contexts[user_id]["history"]) > 10:
         user_contexts[user_id]["history"].pop(0)
 
     headers = {
@@ -123,12 +128,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_text = "⚠️ Не удалось получить ответ от модели. Попробуйте позже."
         else:
             reply_text = result["choices"][0]["message"]["content"]
-            logger.warning(f"Модель вернула пустой ответ. Full raw response: {result}")
             if not reply_text.strip():
+                logger.warning(f"Модель вернула пустой ответ. Full raw response: {result}")
                 reply_text = "Ответ пуст. Пожалуйста, повторите вопрос."
-            else:
-                user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
-
+            user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
 
     except Exception as e:
         logger.error(f"Ошибка при запросе к OpenRouter: {e} | Ответ: {response.text if 'response' in locals() else 'нет ответа'}")
@@ -140,25 +143,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- AIOHTTP + Telegram webhook integration ---
 
 async def handle_webhook(request):
-    app = request.app['telegram_app']
+    """Обработчик POST /webhook для Telegram webhook."""
     data = await request.json()
     logger.info(f"Получен апдейт на /webhook: {data}")
-    update = Update.de_json(data, app.bot)
-    await app.update_queue.put(update)
+    update = Update.de_json(data, request.app["telegram_app"].bot)
+    await request.app["telegram_app"].update_queue.put(update)
     return web.Response(text="OK")
+
+
+async def handle_health(request):
+    return web.Response(text="OK")  # для HEAD / и GET /
 
 
 async def on_startup(app):
     logger.info("Webhook bot starting up...")
-    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
-    await app['telegram_app'].bot.delete_webhook()
-    await app['telegram_app'].bot.set_webhook(webhook_url)
+    webhook_url = RENDER_EXTERNAL_URL.rstrip("/") + "/webhook"
+    await app["telegram_app"].bot.delete_webhook()
+    await app["telegram_app"].bot.set_webhook(webhook_url)
     logger.info(f"Webhook установлен: {webhook_url}")
 
 
 async def on_cleanup(app):
     logger.info("Webhook bot shutting down...")
-    await app['telegram_app'].bot.delete_webhook()
+    await app["telegram_app"].bot.delete_webhook()
 
 
 def main():
@@ -168,9 +175,12 @@ def main():
     telegram_app.add_handler(CallbackQueryHandler(button_handler))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # Aiohttp app
     app = web.Application()
-    app['telegram_app'] = telegram_app
-    app.router.add_post('/webhook', handle_webhook)
+    app["telegram_app"] = telegram_app
+    app.router.add_post("/webhook", handle_webhook)
+    app.router.add_get("/", handle_health)
+    app.router.add_head("/", handle_health)
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
@@ -180,11 +190,13 @@ def main():
     async def runner():
         await telegram_app.initialize()
         await telegram_app.start()
+
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
+        site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
         await site.start()
         logger.info("====== Webhook сервер запущен ======")
+
         while True:
             await asyncio.sleep(3600)
 
