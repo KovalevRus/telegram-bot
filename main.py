@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 from aiohttp import web
-from telegram import Update
+from telegram import Update, Bot
 from telegram.constants import ParseMode
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import aiohttp
@@ -22,145 +22,31 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     logger.error("TELEGRAM_BOT_TOKEN or OPENROUTER_API_KEY is not set in environment variables")
     exit(1)
 
-
-def escape_html(text: str) -> str:
-    """Экранирование HTML-символов для безопасности."""
-    return (text.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace('"', "&quot;")
-                .replace("'", "&#39;"))
-
-
-def markdown_to_html(md: str) -> str:
-    text = escape_html(md)
-
-    # Заголовки h1-h6 (#, ##, ### и т.д.) — стилизуем жирным и размером
-    def header_replacer(m):
-        level = len(m.group(1))
-        size_map = {
-            1: "22px",
-            2: "20px",
-            3: "18px",
-            4: "16px",
-            5: "14px",
-            6: "13px",
-        }
-        size = size_map.get(level, "13px")
-        content = m.group(2).strip()
-        return f'<b><span style="font-size:{size};">{content}</span></b>'
-
-    text = re.sub(r"^(#{1,6})\s*(.+)$", header_replacer, text, flags=re.MULTILINE)
-
-    # Цитаты (строки, начинающиеся с "> ")
-    def blockquote_replacer(m):
-        content = m.group(1).strip()
-        return f'<blockquote style="margin-left:10px; color:#555; font-style:italic;">{content}</blockquote>'
-
-    text = re.sub(r"^>\s*(.+)$", blockquote_replacer, text, flags=re.MULTILINE)
-
-    # Жирный **text**
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    # Подчёркнутый __text__
-    text = re.sub(r"__(.+?)__", r"<u>\1</u>", text)
-    # Зачёркнутый ~~text~~
-    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
-    # Курсив *text*
-    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
-    # Инлайн-код `code`
-    text = re.sub(r"`([^`\n]+?)`", r"<code>\1</code>", text)
-    # Блоки кода ```code```
-    def code_block_replacer(m):
-        code = m.group(1)
-        return f'<pre style="background:#eee; padding:5px; border-radius:5px; white-space:pre-wrap;"><code>{code}</code></pre>'
-    text = re.sub(r"```([\s\S]+?)```", code_block_replacer, text)
-
-    # Списки с поддержкой вложенности
-    def parse_lists(text):
-        lines = text.split("\n")
-        result = []
-        stack = []
-        pattern = re.compile(r"^(\s*)([-*+]|\d+\.)\s+(.*)$")
-
-        for line in lines:
-            m = pattern.match(line)
-            if not m:
-                while stack:
-                    t, _ = stack.pop()
-                    result.append(f"</{t}>")
-                result.append(line)
-                continue
-
-            indent = len(m.group(1).replace('\t', '    '))
-            bullet = m.group(2)
-            content = m.group(3)
-            list_type = "ol" if bullet.endswith(".") else "ul"
-
-            while stack and indent < stack[-1][1]:
-                t, _ = stack.pop()
-                result.append(f"</{t}>")
-
-            if not stack or indent > stack[-1][1]:
-                result.append(f"<{list_type}>")
-                stack.append((list_type, indent))
-            elif stack[-1][0] != list_type:
-                t, _ = stack.pop()
-                result.append(f"</{t}>")
-                result.append(f"<{list_type}>")
-                stack.append((list_type, indent))
-
-            result.append(f"<li>{content}</li>")
-
-        while stack:
-            t, _ = stack.pop()
-            result.append(f"</{t}>")
-
-        return "\n".join(result)
-
-    text = parse_lists(text)
-
-    # Изображения ![alt](url) — заменяем на ссылку с alt-текстом, так как Telegram не поддерживает img в HTML
-    text = re.sub(r"!\[([^\]]*)]\(([^)]+)\)", r'<a href="\2">[image: \1]</a>', text)
-    # Ссылки [text](url)
-    text = re.sub(r"\[([^\]]+)]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
-
-    # Таблицы (простая поддержка)
-    def table_replacer(m):
-        raw_table = m.group(0).strip().split("\n")
-        header = raw_table[0].strip().strip('|').split('|')
-        align = raw_table[1].strip().strip('|').split('|')
-        rows = raw_table[2:]
-
-        html = ['<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;">']
-        html.append("<tr>")
-        for h in header:
-            html.append(f"<th>{h.strip()}</th>")
-        html.append("</tr>")
-
-        for row in rows:
-            html.append("<tr>")
-            cols = row.strip().strip('|').split('|')
-            for col in cols:
-                html.append(f"<td>{col.strip()}</td>")
-            html.append("</tr>")
-
-        html.append("</table>")
-        return "\n".join(html)
-
-    text = re.sub(
-        r"((?:^\|.*\|$\n)(?:^\|[-: ]+\|$\n)(?:^\|.*\|$\n?)+)",
-        table_replacer,
-        text,
-        flags=re.MULTILINE,
+# --- Markdown → HTML конвертер ---
+def markdown_to_html(text: str) -> str:
+    # Экранируем HTML спецсимволы
+    text = (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
     )
 
-    # Переносы строк → <br>
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = text.replace("\n\n", "<br><br>").replace("\n", "<br>")
+    # **bold** → <b>
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    # *italic* → <i>
+    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
+    # `code` → <code>
+    text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
+    # ### Заголовки → <b> (Markdown-style заголовки)
+    text = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+    # Ссылки [text](url) → <a href="url">text</a>
+    text = re.sub(r"\[([^\]]+)]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
 
+    # Заменяем случайный <br> на \n (чтобы избежать ошибки Telegram)
+    text = text.replace("<br>", "\n")
+
+    # Оставляем переносы строк как есть (\n) — Telegram корректно их обрабатывает в HTML режиме
     return text
-
 
 async def query_openrouter_with_retry(payload, headers, retries=2):
     for attempt in range(retries):
@@ -186,7 +72,6 @@ async def query_openrouter_with_retry(payload, headers, retries=2):
         }]
     }
 
-
 async def ask_model(question: str):
     payload = {
         "model": "deepseek/deepseek-r1:free",
@@ -206,16 +91,16 @@ async def ask_model(question: str):
 
     return markdown_to_html(content)
 
-
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
 
+    # Обработка только упоминаний или ответов
     if not message or not message.text:
         return
-    # Обрабатываем только, если сообщение — ответ боту или упоминание бота
     if not (message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id) and not message.entities:
         return
 
+    # Проверка на упоминание бота
     mentioned = any(
         e.type == "mention" or e.type == "text_mention"
         for e in message.entities
@@ -228,10 +113,8 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer = await ask_model(user_text)
         await message.reply_text(answer, parse_mode=ParseMode.HTML)
 
-
 async def handle_health(request):
     return web.Response(text="OK")
-
 
 async def run():
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -269,7 +152,6 @@ async def run():
     logger.info("Бот и сервер запущены. Ожидание событий...")
     while True:
         await asyncio.sleep(3600)
-
 
 if __name__ == "__main__":
     asyncio.run(run())
