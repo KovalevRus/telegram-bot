@@ -131,11 +131,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработка Telegram webhook
 async def handle_webhook(request):
-    app = request.app['telegram_app']
     data = await request.json()
+    logger.info(f"Получен апдейт на /webhook: {data}")
+    app = request.app['telegram_app']
     update = Update.de_json(data, app.bot)
     await app.update_queue.put(update)
     return web.Response(text="OK")
+
 
 # Установка и удаление webhook
 async def on_startup(app):
