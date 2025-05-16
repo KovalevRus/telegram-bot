@@ -180,7 +180,6 @@ def main():
     app["telegram_app"] = telegram_app
     app.router.add_post("/webhook", handle_webhook)
     app.router.add_get("/", handle_health)
-    app.router.add_head("/", handle_health)
 
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
