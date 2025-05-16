@@ -24,9 +24,14 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     exit(1)
 
 
-def escape_markdown(text: str) -> str:
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+def escape_markdown_v2(text: str) -> str:
+    """
+    Экранирует спецсимволы MarkdownV2 согласно документации Telegram:
+    https://core.telegram.org/bots/api#markdownv2-style
+    """
+    escape_chars = r'\_*[]()~`>#+-=|{}.!'
+    return ''.join(['\\' + char if char in escape_chars else char for char in text])
+
 
 
 async def query_openrouter_with_retry(payload, headers, retries=2):
@@ -99,7 +104,7 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Запрос от пользователя: {user_text}")
 
         answer = await ask_model(user_text)
-        formatted = escape_markdown(answer)
+        formatted = escape_markdown_v2(answer)
 
         await update.message.reply_text(formatted, parse_mode=ParseMode.MARKDOWN_V2)
     else:
