@@ -10,3 +10,7 @@ services:
         value: your_telegram_token
       - key: OPENROUTER_API_KEY
         value: your_openrouter_key
+      - key: RENDER_EXTERNAL_URL
+        fromService:
+          type: web
+          name: telegram-bot
