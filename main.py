@@ -168,17 +168,17 @@ def main():
     import asyncio
 
     async def runner():
-    await telegram_app.initialize()
-    await telegram_app.start()  # это включает обработку update_queue
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
-    await site.start()
-    logger.info("====== Webhook сервер запущен ======")
-
-    while True:
-        await asyncio.sleep(3600)
+        await telegram_app.initialize()
+        await telegram_app.start()  # это включает обработку update_queue
+    
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
+        await site.start()
+        logger.info("====== Webhook сервер запущен ======")
+    
+        while True:
+            await asyncio.sleep(3600)
 
 
     asyncio.run(runner())
