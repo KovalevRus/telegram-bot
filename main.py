@@ -151,6 +151,11 @@ async def on_cleanup(app):
     await app['telegram_app'].bot.delete_webhook()
 
 def main():
+    port = os.environ.get("PORT")
+    if not port:
+        logger.error("❌ Переменная PORT не найдена в окружении!")
+    else:
+        logger.info(f"✅ PORT из окружения: {port}")
     telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     telegram_app.add_handler(CommandHandler("start", start))
