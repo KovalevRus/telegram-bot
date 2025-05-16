@@ -168,19 +168,18 @@ def main():
     import asyncio
 
     async def runner():
-        try:
-            await telegram_app.initialize()
-            await telegram_app.start()
-            runner = web.AppRunner(app)
-            await runner.setup()
-            port = int(os.environ.get("PORT", "10000"))
-            site = web.TCPSite(runner, '0.0.0.0', port)
-            await site.start()
-            logger.info(f"====== Webhook сервер запущен на порту {port} ======")
-            while True:
-                await asyncio.sleep(3600)
-        except Exception as e:
-            logger.exception("❌ Ошибка при запуске webhook-сервера:")
+    await telegram_app.initialize()
+    await telegram_app.start()  # это включает обработку update_queue
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
+    await site.start()
+    logger.info("====== Webhook сервер запущен ======")
+
+    while True:
+        await asyncio.sleep(3600)
+
 
     asyncio.run(runner())
 
