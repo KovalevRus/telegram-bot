@@ -14,22 +14,24 @@ from telegram.ext import (
 )
 from aiohttp import web
 
+# Логгирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Переменные окружения
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")  # https://yourapp.onrender.com
 
 MODELS = {
     "deepseek": "deepseek/deepseek-r1:free",
     "gpt4o-mini": "gpt-4o-mini",
     "gpt4o": "gpt-4o",
 }
-
-user_contexts = {}
 DEFAULT_MODEL = "deepseek"
+user_contexts = {}
 
+# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("DeepSeek R1", callback_data="model_deepseek")],
@@ -41,10 +43,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "model": DEFAULT_MODEL,
         "history": []
     }
-    await update.message.reply_text(
-        "Привет! Я бот на базе OpenRouter. Выбери модель ИИ:", reply_markup=reply_markup
-    )
+    await update.message.reply_text("Привет! Я бот на базе OpenRouter. Выбери модель ИИ:", reply_markup=reply_markup)
 
+# Обработка кнопок
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -53,18 +54,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("model_"):
         chosen = query.data[len("model_"):]
         if chosen in MODELS:
-            user_contexts.setdefault(user_id, {"model": chosen, "history": []})["model"] = chosen
-            await query.edit_message_text(text=f"Вы выбрали модель: {chosen}")
+            user_contexts.setdefault(user_id, {"model": chosen, "history": []})
+            user_contexts[user_id]["model"] = chosen
+            await query.edit_message_text(f"Вы выбрали модель: {chosen}")
         else:
-            await query.edit_message_text(text="Неизвестная модель.")
+            await query.edit_message_text("Неизвестная модель.")
     else:
-        await query.edit_message_text(text="Неизвестная команда.")
+        await query.edit_message_text("Неизвестная команда.")
 
+# Обработка сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_text = update.message.text.strip()
 
     if not user_text:
+        logger.warning("Пустое сообщение")
         return
 
     if update.message.chat.type != "private":
@@ -116,19 +120,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 reply_text = "⚠️ Не удалось получить ответ от модели. Попробуйте позже."
         else:
-            reply_text = result["choices"][0]["message"]["content"]
-            if not reply_text.strip():
-                reply_text = "Ответ пуст. Пожалуйста, повторите вопрос."
+            reply_text = result["choices"][0]["message"]["content"].strip() or "Ответ пуст. Повторите вопрос."
             user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
 
     except Exception as e:
         logger.error(f"Ошибка при запросе к OpenRouter: {e} | Ответ: {response.text if 'response' in locals() else 'нет ответа'}")
-        reply_text = "Извините, произошла ошибка при обработке вашего запроса."
+        reply_text = "Произошла ошибка при обработке запроса."
 
     await update.message.reply_text(reply_text)
 
-# --- AIOHTTP + telegram webhook integration ---
-
+# Обработка Telegram webhook
 async def handle_webhook(request):
     app = request.app['telegram_app']
     data = await request.json()
@@ -136,26 +137,20 @@ async def handle_webhook(request):
     await app.update_queue.put(update)
     return web.Response(text="OK")
 
-async def root_handler(request):
-    return web.Response(text="Bot is running!")
-
+# Установка и удаление webhook
 async def on_startup(app):
-    logger.info("Webhook bot starting up...")
+    logger.info("🔄 Старт приложения. Устанавливаем webhook...")
     webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
     await app['telegram_app'].bot.delete_webhook()
     await app['telegram_app'].bot.set_webhook(webhook_url)
-    logger.info(f"Webhook установлен: {webhook_url}")
+    logger.info(f"✅ Webhook установлен: {webhook_url}")
 
 async def on_cleanup(app):
-    logger.info("Webhook bot shutting down...")
+    logger.info("🧹 Завершается приложение. Удаляем webhook...")
     await app['telegram_app'].bot.delete_webhook()
 
+# Главная функция
 def main():
-    port = os.environ.get("PORT")
-    if not port:
-        logger.error("❌ Переменная PORT не найдена в окружении!")
-    else:
-        logger.info(f"✅ PORT из окружения: {port}")
     telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     telegram_app.add_handler(CommandHandler("start", start))
@@ -165,28 +160,25 @@ def main():
     app = web.Application()
     app['telegram_app'] = telegram_app
     app.router.add_post('/webhook', handle_webhook)
-    app.router.add_get('/', root_handler)
-
-    app.on_startup.append(lambda app: on_startup(app))
-    app.on_cleanup.append(lambda app: on_cleanup(app))
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
 
     import asyncio
 
     async def runner():
-        await telegram_app.initialize()
-        await telegram_app.start()
-
-        # 🚀 Обработка апдейтов из update_queue
-        telegram_app.create_task(telegram_app._running_polling(), name="webhook_update_loop")
-
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
-        await site.start()
-        logger.info("====== Webhook сервер запущен ======")
-
-        while True:
-            await asyncio.sleep(3600)
+        try:
+            await telegram_app.initialize()
+            await telegram_app.start()
+            runner = web.AppRunner(app)
+            await runner.setup()
+            port = int(os.environ.get("PORT", "10000"))
+            site = web.TCPSite(runner, '0.0.0.0', port)
+            await site.start()
+            logger.info(f"====== Webhook сервер запущен на порту {port} ======")
+            while True:
+                await asyncio.sleep(3600)
+        except Exception as e:
+            logger.exception("❌ Ошибка при запуске webhook-сервера:")
 
     asyncio.run(runner())
 
