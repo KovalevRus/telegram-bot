@@ -107,7 +107,7 @@ async def handle_health(request):
     return web.Response(text="OK")
 
 
-def main():
+async def main():
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_update))
 
@@ -126,21 +126,24 @@ def main():
     if webhook_url:
         full_webhook_url = f"{webhook_url}{WEBHOOK_PATH}"
         logger.info(f"Устанавливаем webhook: {full_webhook_url}")
-        asyncio.run(telegram_app.bot.set_webhook(full_webhook_url))
+        await telegram_app.bot.set_webhook(full_webhook_url)
     else:
         logger.warning("RENDER_EXTERNAL_URL не задан — webhook не установлен")
 
-    async def run():
-        await telegram_app.initialize()
-        await telegram_app.start()
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", PORT)
-        await site.start()
-        logger.info(f"Сервер aiohttp запущен на порту {PORT}")
+    await telegram_app.initialize()
+    await telegram_app.start()
 
-    asyncio.run(run())
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
 
+    logger.info(f"Сервер aiohttp запущен на порту {PORT}")
+
+    # Не даём выйти из функции — ждём завершения
+    await telegram_app.updater.wait_until_shutdown()
+    await telegram_app.stop()
+    await telegram_app.shutdown()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
