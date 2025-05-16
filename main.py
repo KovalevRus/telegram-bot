@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 from aiohttp import web
-from telegram import Update, Bot
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import aiohttp
@@ -24,31 +24,44 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
 
 # --- Markdown → HTML конвертер ---
 def markdown_to_html(text: str) -> str:
-    # Экранируем HTML спецсимволы
     text = (
         text.replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
     )
-
-    # **bold** → <b>
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    # *italic* → <i>
     text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
-    # `code` → <code>
     text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
-    # ### Заголовки → <b> (Markdown-style заголовки)
     text = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
-    # Ссылки [text](url) → <a href="url">text</a>
     text = re.sub(r"\[([^\]]+)]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
-
-    # Заменяем случайный <br> на \n (чтобы избежать ошибки Telegram)
-    text = text.replace("<br>", "\n")
-
-    # Оставляем переносы строк как есть (\n) — Telegram корректно их обрабатывает в HTML режиме
     return text
 
-async def query_openrouter_with_retry(payload, headers, retries=2):
+MAX_MESSAGE_LENGTH = 4096
+
+async def send_long_message(message, text, parse_mode=ParseMode.HTML):
+    """
+    Разбивает длинный текст на части по MAX_MESSAGE_LENGTH и отправляет по очереди.
+    """
+    # Простое разбиение по абзацам
+    parts = []
+    current_part = ""
+    for paragraph in text.split("\n"):
+        if len(current_part) + len(paragraph) + 1 > MAX_MESSAGE_LENGTH:
+            parts.append(current_part)
+            current_part = paragraph
+        else:
+            if current_part:
+                current_part += "\n" + paragraph
+            else:
+                current_part = paragraph
+    if current_part:
+        parts.append(current_part)
+
+    for part in parts:
+        await message.reply_text(part, parse_mode=parse_mode)
+
+async def query_openrouter_with_retry(payload, headers, retries=5):
+    delay = 1
     for attempt in range(retries):
         try:
             async with aiohttp.ClientSession() as session:
@@ -57,11 +70,19 @@ async def query_openrouter_with_retry(payload, headers, retries=2):
                     headers=headers,
                     json=payload,
                 ) as response:
+                    if response.status != 200:
+                        logger.warning(f"OpenRouter ответил с ошибкой HTTP {response.status}")
+                        raise Exception(f"HTTP {response.status}")
                     result = await response.json()
+                    if 'choices' in result and result['choices']:
+                        choice0 = result['choices'][0]
+                        if 'error' in choice0:
+                            raise Exception(f"OpenRouter API error: {choice0['error']}")
                     return result
         except Exception as e:
-            logger.warning("Ошибка запроса к OpenRouter: %s", e)
-            await asyncio.sleep(1)
+            logger.warning(f"Ошибка запроса к OpenRouter (попытка {attempt+1}): {e}")
+            await asyncio.sleep(delay)
+            delay *= 2
 
     return {
         "choices": [{
@@ -94,13 +115,12 @@ async def ask_model(question: str):
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
 
-    # Обработка только упоминаний или ответов
     if not message or not message.text:
         return
+
     if not (message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id) and not message.entities:
         return
 
-    # Проверка на упоминание бота
     mentioned = any(
         e.type == "mention" or e.type == "text_mention"
         for e in message.entities
@@ -111,7 +131,7 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Запрос от пользователя: {user_text}")
 
         answer = await ask_model(user_text)
-        await message.reply_text(answer, parse_mode=ParseMode.HTML)
+        await send_long_message(message, answer, parse_mode=ParseMode.HTML)
 
 async def handle_health(request):
     return web.Response(text="OK")
