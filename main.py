@@ -1,205 +1,143 @@
-import logging
 import os
-import requests
-import datetime
-import pytz
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
-)
+import logging
+import asyncio
 from aiohttp import web
+from telegram import Update, Bot
+from telegram.ext import Application, ContextTypes, CommandHandler, MessageHandler, filters
 
-logging.basicConfig(level=logging.INFO)
+import aiohttp
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")  # e.g., https://yourapp.onrender.com
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+PORT = int(os.getenv("PORT", "8080"))
+WEBHOOK_PATH = "/webhook"
 
-MODELS = {
-    "deepseek": "deepseek/deepseek-r1:free",
-    "gpt4o-mini": "gpt-4o-mini",
-    "gpt4o": "gpt-4o",
-}
-
-user_contexts = {}
-DEFAULT_MODEL = "deepseek"
+if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
+    logger.error("TELEGRAM_BOT_TOKEN or OPENROUTER_API_KEY is not set in environment variables")
+    exit(1)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("DeepSeek R1", callback_data="model_deepseek")],
-        [InlineKeyboardButton("GPT-4o-mini", callback_data="model_gpt4o-mini")],
-        [InlineKeyboardButton("GPT-4o", callback_data="model_gpt4o")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    user_contexts[update.effective_user.id] = {
-        "model": DEFAULT_MODEL,
-        "history": []
+async def query_openrouter_with_retry(payload, headers, retries=2):
+    for attempt in range(retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                ) as response:
+                    result = await response.json()
+
+                    # Проверяем есть ли ошибка в ответе модели
+                    if result.get("choices") and result["choices"][0].get("error"):
+                        logger.warning("Ошибка OpenRouter: %s", result["choices"][0]["error"])
+                        await asyncio.sleep(1)
+                        continue
+
+                    return result
+        except Exception as e:
+            logger.warning("Ошибка запроса к OpenRouter: %s", e)
+            await asyncio.sleep(1)
+
+    # Возврат fallback-ответа при ошибках
+    return {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "Извините, сейчас возникли технические трудности, пожалуйста, повторите запрос позже."
+            }
+        }]
     }
-    await update.message.reply_text(
-        "Привет! Я бот на базе OpenRouter. Выбери модель ИИ:", reply_markup=reply_markup
-    )
 
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    if query.data.startswith("model_"):
-        chosen = query.data[len("model_"):]
-        if chosen in MODELS:
-            if user_id not in user_contexts:
-                user_contexts[user_id] = {"model": chosen, "history": []}
-            else:
-                user_contexts[user_id]["model"] = chosen
-            await query.edit_message_text(text=f"Вы выбрали модель: {chosen}")
-        else:
-            await query.edit_message_text(text="Неизвестная модель.")
-    else:
-        await query.edit_message_text(text="Неизвестная команда.")
-
-
-MAX_MESSAGE_LENGTH = 1500
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_text = update.message.text.strip()
-
-    if not user_text:
-        logger.warning("Получено пустое сообщение. Пропускаем.")
-        return
-
-    if update.message.chat.type != "private":
-        if not (update.message.entities or update.message.reply_to_message):
-            return
-        if "дипсик" not in user_text.lower() and not (
-            update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-        ):
-            return
-
-    if user_id not in user_contexts:
-        user_contexts[user_id] = {"model": DEFAULT_MODEL, "history": []}
-
-    model_name = user_contexts[user_id]["model"]
-    model_id = MODELS.get(model_name, DEFAULT_MODEL)
-
-    user_contexts[user_id]["history"].append({"role": "user", "content": user_text})
-    if len(user_contexts[user_id]["history"]) > 10:
-        user_contexts[user_id]["history"].pop(0)
-
+async def ask_model(question: str):
+    payload = {
+        "model": "deepseek/deepseek-r1:free",
+        "messages": [{"role": "user", "content": question}],
+    }
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
-    data = {
-        "model": model_id,
-        "messages": user_contexts[user_id]["history"]
-    }
 
-    try:
-        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
-        response.raise_for_status()
-        result = response.json()
+    response = await query_openrouter_with_retry(payload, headers)
 
-        if "choices" not in result:
-            error = result.get("error", {})
-            if error.get("code") == 429:
-                reset_ms = error.get("metadata", {}).get("headers", {}).get("X-RateLimit-Reset")
-                if reset_ms:
-                    utc_reset = datetime.datetime.utcfromtimestamp(int(reset_ms) / 1000)
-                    msk_tz = pytz.timezone("Europe/Moscow")
-                    msk_reset = utc_reset.replace(tzinfo=pytz.utc).astimezone(msk_tz)
-                    reset_str = msk_reset.strftime('%Y-%m-%d %H:%M:%S')
-                    reply_text = (
-                        "🚫 Превышен лимит бесплатных запросов к OpenRouter.\n"
-                        f"⏳ Лимит обновится по МСК: {reset_str}."
-                    )
-                else:
-                    reply_text = "🚫 Превышен лимит бесплатных запросов к OpenRouter. Попробуйте позже."
-            else:
-                reply_text = "⚠️ Не удалось получить ответ от модели. Попробуйте позже."
-        else:
-            reply_text = result["choices"][0]["message"]["content"]
-            if not reply_text.strip():
-                logger.warning(f"Модель вернула пустой ответ. Full raw response: {result}")
-                reply_text = "Ответ пуст. Пожалуйста, повторите вопрос."
-            user_contexts[user_id]["history"].append({"role": "assistant", "content": reply_text})
-
-    except Exception as e:
-        logger.error(f"Ошибка при запросе к OpenRouter: {e} | Ответ: {response.text if 'response' in locals() else 'нет ответа'}")
-        reply_text = "Извините, произошла ошибка при обработке вашего запроса."
-
-    await update.message.reply_text(reply_text)
+    content = response["choices"][0]["message"]["content"]
+    if not content.strip():
+        logger.warning("Модель вернула пустой ответ. Full raw response: %s", response)
+        return "Ответ пуст. Пожалуйста, повторите вопрос."
+    return content
 
 
-# --- AIOHTTP + Telegram webhook integration ---
+async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Получен апдейт: {update.to_dict()}")
 
-async def handle_webhook(request):
-    """Обработчик POST /webhook для Telegram webhook."""
-    data = await request.json()
-    logger.info(f"Получен апдейт на /webhook: {data}")
-    update = Update.de_json(data, request.app["telegram_app"].bot)
-    await request.app["telegram_app"].update_queue.put(update)
-    return web.Response(text="OK")
+    if update.message and update.message.text:
+        user_text = update.message.text
+        logger.info(f"Запрос от пользователя: {user_text}")
+
+        answer = await ask_model(user_text)
+        await update.message.reply_text(answer)
+    else:
+        logger.info("Получено сообщение без текста")
 
 
 async def handle_health(request):
-    return web.Response(text="OK")  # для HEAD / и GET /
+    return web.Response(text="OK")
 
 
 async def on_startup(app):
-    logger.info("Webhook bot starting up...")
-    webhook_url = RENDER_EXTERNAL_URL.rstrip("/") + "/webhook"
-    await app["telegram_app"].bot.delete_webhook()
-    await app["telegram_app"].bot.set_webhook(webhook_url)
-    logger.info(f"Webhook установлен: {webhook_url}")
-
-
-async def on_cleanup(app):
-    logger.info("Webhook bot shutting down...")
-    await app["telegram_app"].bot.delete_webhook()
+    logger.info("Webhook сервер запущен")
 
 
 def main():
-    telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CallbackQueryHandler(button_handler))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_update))
 
-    # Aiohttp app
+    # Aiohttp web app
     app = web.Application()
-    app["telegram_app"] = telegram_app
-    app.router.add_post("/webhook", handle_webhook)
-    app.router.add_get("/", handle_health)
 
-    app.on_startup.append(on_startup)
-    app.on_cleanup.append(on_cleanup)
+    # Webhook endpoint для Telegram
+    async def webhook_handler(request):
+        data = await request.json()
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.update_queue.put(update)
+        return web.Response(text="OK")
 
-    import asyncio
+    app.router.add_post(WEBHOOK_PATH, webhook_handler)
 
-    async def runner():
-        await telegram_app.initialize()
-        await telegram_app.start()
+    # Для проверки здоровья сервиса (health check)
+    async def health_handler(request):
+        return web.Response(text="OK")
 
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
-        await site.start()
-        logger.info("====== Webhook сервер запущен ======")
+    app.router.add_get("/", health_handler)
 
-        while True:
-            await asyncio.sleep(3600)
+    # Запускаем webhook для telegram
+    # Устанавливаем webhook
+    webhook_url = os.getenv("RENDER_EXTERNAL_URL")
+    if webhook_url:
+        full_webhook_url = f"{webhook_url}{WEBHOOK_PATH}"
+        logger.info(f"Setting webhook URL to: {full_webhook_url}")
+        asyncio.run(telegram_app.bot.set_webhook(full_webhook_url))
+    else:
+        logger.warning("RENDER_EXTERNAL_URL is not set, webhook won't be set automatically")
 
-    asyncio.run(runner())
+    # Запускаем Telegram app и aiohttp сервер одновременно
+    loop = asyncio.get_event_loop()
+
+    # Запускаем Telegram приложение (оно работает в фоне)
+    loop.create_task(telegram_app.initialize())
+    loop.create_task(telegram_app.start())
+    loop.create_task(telegram_app.updater.start_polling())  # Подстраховка, на случай если webhook не работает
+
+    # Запускаем aiohttp сервер
+    web.run_app(app, port=PORT)
 
 
 if __name__ == "__main__":
