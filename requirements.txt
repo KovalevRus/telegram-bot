@@ -1,5 +1,3 @@
-pytz
-aiohttp
 python-telegram-bot[aiohttp]==20.3
-aiohttp==3.8.5
 requests==2.31.0
+pytz
