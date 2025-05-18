@@ -8,6 +8,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import aiohttp
 import re
 import json
+import tiktoken
 
 # === ЛОГИ ===
 logging.basicConfig(
@@ -21,10 +22,6 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 PORT = int(os.getenv("PORT", "8080"))
 WEBHOOK_PATH = "/webhook"
 HISTORY_FILE = "chat_histories.json"
-MAX_TOKENS = 500
-
-DEFAULT_MODEL = "deepseek/deepseek-r1:free"
-FALLBACK_MODEL = "openchat/openchat-7b:free"
 
 if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     logger.error("TELEGRAM_BOT_TOKEN or OPENROUTER_API_KEY is not set in environment variables")
@@ -60,6 +57,16 @@ def markdown_to_html(text: str) -> str:
     text = re.sub(r"\[([^\]]+)]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
     return text
 
+# === Подсчёт токенов ===
+def count_tokens(messages, model="gpt-3.5-turbo"):
+    encoding = tiktoken.encoding_for_model(model)
+    num_tokens = 0
+    for msg in messages:
+        num_tokens += 4  # каждый message с overhead
+        for key, value in msg.items():
+            num_tokens += len(encoding.encode(value))
+    return num_tokens + 2
+
 # === Запрос к OpenRouter ===
 async def query_openrouter(payload, headers, retries=2):
     for attempt in range(retries):
@@ -72,23 +79,24 @@ async def query_openrouter(payload, headers, retries=2):
             await asyncio.sleep(1)
 
     return {
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": ""
-            }
-        }]
+        "choices": [ { "message": { "role": "assistant", "content": "" } } ]
     }
 
 # === Основной запрос к ИИ ===
 async def ask_model(chat_id: str, user_text: str) -> str:
     append_to_history(chat_id, "user", user_text)
+    history = chat_histories.get(chat_id, [])
 
-    async def call_model(model_name: str):
+    max_context_tokens = 16000
+    history_tokens = count_tokens(history)
+    available_tokens = max_context_tokens - history_tokens
+    max_tokens = min(2000, max(500, available_tokens))
+
+    async def try_model(model_name):
         payload = {
             "model": model_name,
-            "messages": chat_histories.get(chat_id, []),
-            "max_tokens": MAX_TOKENS
+            "messages": history,
+            "max_tokens": max_tokens
         }
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -96,26 +104,22 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         }
         return await query_openrouter(payload, headers)
 
-    # Первый запрос — дефолтная модель
-    response = await call_model(DEFAULT_MODEL)
+    # 1. Попробуем DeepSeek
+    response = await try_model("deepseek/deepseek-r1:free")
     content = response["choices"][0]["message"]["content"].strip()
 
-    if content:
-        append_to_history(chat_id, "assistant", content)
-        return markdown_to_html(content)
+    if not content:
+        logger.warning("DeepSeek дал пустой ответ. Пробуем Mixtral...")
+        # 2. Fallback: Mixtral
+        response = await try_model("mistralai/mixtral-8x7b")
+        content = response["choices"][0]["message"]["content"].strip()
 
-    logger.warning(f"[{chat_id}] Пустой ответ от {DEFAULT_MODEL}, переключаюсь на fallback модель...")
+        if not content:
+            logger.warning("Mixtral тоже дал пустой ответ. Full response: %s", response)
+            return "Ответ пуст. Пожалуйста, повторите вопрос."
 
-    # Второй запрос — fallback модель
-    response = await call_model(FALLBACK_MODEL)
-    content = response["choices"][0]["message"]["content"].strip()
-
-    if content:
-        append_to_history(chat_id, "assistant", content)
-        return markdown_to_html(content)
-
-    logger.warning(f"[{chat_id}] Пустой ответ и от fallback модели.")
-    return "Ответ пуст. Пожалуйста, повторите вопрос."
+    append_to_history(chat_id, "assistant", content)
+    return markdown_to_html(content)
 
 # === Обработка входящих сообщений ===
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
