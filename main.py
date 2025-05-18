@@ -28,7 +28,7 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     exit(1)
 
 # === Firestore ===
-cred = credentials.Certificate("service_account.json")
+cred = credentials.Certificate("telegram-bot-8890a-firebase-adminsdk-fbsvc-38e5c4d984.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
