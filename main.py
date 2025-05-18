@@ -21,7 +21,10 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 PORT = int(os.getenv("PORT", "8080"))
 WEBHOOK_PATH = "/webhook"
 HISTORY_FILE = "chat_histories.json"
-MAX_TOKENS = 600  # Ограничение на количество токенов в ответе
+MAX_TOKENS = 500
+
+DEFAULT_MODEL = "deepseek/deepseek-r1:free"
+FALLBACK_MODEL = "openchat/openchat-7b:free"
 
 if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     logger.error("TELEGRAM_BOT_TOKEN or OPENROUTER_API_KEY is not set in environment variables")
@@ -81,25 +84,38 @@ async def query_openrouter(payload, headers, retries=2):
 async def ask_model(chat_id: str, user_text: str) -> str:
     append_to_history(chat_id, "user", user_text)
 
-    payload = {
-        "model": "deepseek/deepseek-r1:free",
-        "messages": chat_histories.get(chat_id, []),
-        "max_tokens": MAX_TOKENS  # Добавлено ограничение токенов
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    async def call_model(model_name: str):
+        payload = {
+            "model": model_name,
+            "messages": chat_histories.get(chat_id, []),
+            "max_tokens": MAX_TOKENS
+        }
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        return await query_openrouter(payload, headers)
 
-    response = await query_openrouter(payload, headers)
-    content = response["choices"][0]["message"]["content"]
+    # Первый запрос — дефолтная модель
+    response = await call_model(DEFAULT_MODEL)
+    content = response["choices"][0]["message"]["content"].strip()
 
-    if not content.strip():
-        logger.warning("Модель вернула пустой ответ. Full raw response: %s", response)
-        return "Ответ пуст. Пожалуйста, повторите вопрос."
+    if content:
+        append_to_history(chat_id, "assistant", content)
+        return markdown_to_html(content)
 
-    append_to_history(chat_id, "assistant", content)
-    return markdown_to_html(content)
+    logger.warning(f"[{chat_id}] Пустой ответ от {DEFAULT_MODEL}, переключаюсь на fallback модель...")
+
+    # Второй запрос — fallback модель
+    response = await call_model(FALLBACK_MODEL)
+    content = response["choices"][0]["message"]["content"].strip()
+
+    if content:
+        append_to_history(chat_id, "assistant", content)
+        return markdown_to_html(content)
+
+    logger.warning(f"[{chat_id}] Пустой ответ и от fallback модели.")
+    return "Ответ пуст. Пожалуйста, повторите вопрос."
 
 # === Обработка входящих сообщений ===
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
