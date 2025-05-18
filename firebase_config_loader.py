@@ -12,9 +12,9 @@ def initialize_firebase():
     if firebase_app is not None:
         return db
 
-    firebase_config_json = os.getenv("GOOGLE_CREDENTIALS")
+    firebase_config_json = os.getenv("FIREBASE_JSON")
     if not firebase_config_json:
-        raise ValueError("Переменная окружения GOOGLE_CREDENTIALS не установлена.")
+        raise ValueError("Переменная окружения FIREBASE_JSON не установлена.")
 
     try:
         firebase_config = json.loads(firebase_config_json)
