@@ -8,7 +8,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import aiohttp
 import re
 import json
-from firebase_admin import firestore
+
 from firebase_config_loader import initialize_firebase
 
 # === ЛОГИ ===
@@ -28,8 +28,7 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     exit(1)
 
 # === Firestore ===
-initialize_firebase()
-db = firestore.client()
+db = initialize_firebase()
 
 # === ИСТОРИЯ ===
 def load_chat_history(chat_id: str):
