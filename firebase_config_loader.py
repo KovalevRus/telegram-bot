@@ -3,18 +3,19 @@ import json
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-def initialize_firebase():
-    if not firebase_admin._apps:
-        json_str = os.getenv("GOOGLE_CREDENTIALS")
-        if not json_str:
-            raise Exception("Переменная окружения GOOGLE_CREDENTIALS не установлена")
+def initialize_firestore():
+    if firebase_admin._apps:
+        return firestore.client()
 
-        # Заменяем \n на настоящие переводы строк в закрытом ключе
-        data = json.loads(json_str)
-        if "private_key" in data:
-            data["private_key"] = data["private_key"].replace("\\n", "\n")
+    cred_info = os.getenv("GOOGLE_CREDENTIALS")
+    if not cred_info:
+        raise ValueError("GOOGLE_CREDENTIALS not set in environment variables.")
 
-        cred = credentials.Certificate(data)
-        firebase_admin.initialize_app(cred)
+    try:
+        cred_dict = json.loads(cred_info)
+    except json.JSONDecodeError:
+        raise ValueError("GOOGLE_CREDENTIALS is not valid JSON.")
 
+    cred = credentials.Certificate(cred_dict)
+    firebase_admin.initialize_app(cred)
     return firestore.client()
