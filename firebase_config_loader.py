@@ -3,24 +3,18 @@ import json
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-firebase_app = None
-db = None
-
 def initialize_firebase():
-    global firebase_app, db
+    if not firebase_admin._apps:
+        json_str = os.getenv("GOOGLE_CREDENTIALS")
+        if not json_str:
+            raise Exception("Переменная окружения GOOGLE_CREDENTIALS не установлена")
 
-    if firebase_app is not None:
-        return db
+        # Заменяем \n на настоящие переводы строк в закрытом ключе
+        data = json.loads(json_str)
+        if "private_key" in data:
+            data["private_key"] = data["private_key"].replace("\\n", "\n")
 
-    firebase_config_json = os.getenv("GOOGLE_CREDENTIALS")
-    if not firebase_config_json:
-        raise ValueError("Переменная окружения GOOGLE_CREDENTIALS не установлена.")
+        cred = credentials.Certificate(data)
+        firebase_admin.initialize_app(cred)
 
-    try:
-        firebase_config = json.loads(firebase_config_json)
-        cred = credentials.Certificate(firebase_config)
-        firebase_app = firebase_admin.initialize_app(cred)
-        db = firestore.client()
-        return db
-    except Exception as e:
-        raise RuntimeError(f"Ошибка при инициализации Firebase: {e}")
+    return firestore.client()
