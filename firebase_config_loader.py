@@ -3,19 +3,21 @@ import json
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-def initialize_firestore():
+def initialize_firebase():
     if firebase_admin._apps:
         return firestore.client()
 
-    cred_info = os.getenv("GOOGLE_CREDENTIALS")
-    if not cred_info:
-        raise ValueError("GOOGLE_CREDENTIALS not set in environment variables.")
+    firebase_credentials_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
+
+    if not firebase_credentials_json:
+        raise ValueError("FIREBASE_CREDENTIALS_JSON environment variable is not set.")
 
     try:
-        cred_dict = json.loads(cred_info)
+        firebase_credentials_dict = json.loads(firebase_credentials_json)
     except json.JSONDecodeError:
-        raise ValueError("GOOGLE_CREDENTIALS is not valid JSON.")
+        raise ValueError("FIREBASE_CREDENTIALS_JSON is not valid JSON.")
 
-    cred = credentials.Certificate(cred_dict)
+    cred = credentials.Certificate(firebase_credentials_dict)
     firebase_admin.initialize_app(cred)
+
     return firestore.client()
