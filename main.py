@@ -8,7 +8,8 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import aiohttp
 import re
 import json
-import tiktoken
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 # === ЛОГИ ===
 logging.basicConfig(
@@ -21,50 +22,30 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 PORT = int(os.getenv("PORT", "8080"))
 WEBHOOK_PATH = "/webhook"
-HISTORY_FILE = "chat_histories.json"
-MAX_TOKENS_HISTORY = 5000  # ограничение на суммарные токены в истории
-
-PRIMARY_MODEL = "deepseek/deepseek-r1:free"
-FALLBACK_MODEL = "openchat/openchat-3.5:free"
 
 if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     logger.error("TELEGRAM_BOT_TOKEN or OPENROUTER_API_KEY is not set in environment variables")
     exit(1)
 
+# === Firestore ===
+cred = credentials.Certificate("service_account.json")
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
 # === ИСТОРИЯ ===
-chat_histories = {}
+def load_chat_history(chat_id: str):
+    doc_ref = db.collection("chat_histories").document(chat_id)
+    doc = doc_ref.get()
+    return doc.to_dict().get("messages", []) if doc.exists else []
 
-def load_chat_histories():
-    global chat_histories
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            chat_histories = json.load(f)
-            logger.info("История загружена")
+def save_chat_history(chat_id: str, history):
+    db.collection("chat_histories").document(chat_id).set({"messages": history})
 
-def save_chat_histories():
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(chat_histories, f, ensure_ascii=False, indent=2)
-
-def count_tokens(text: str) -> int:
-    enc = tiktoken.get_encoding("cl100k_base")
-    return len(enc.encode(text))
-
-def append_to_history(chat_id: str, role: str, content: str):
-    history = chat_histories.get(chat_id, [])
+def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
+    history = load_chat_history(chat_id)
     history.append({"role": role, "content": content})
-
-    # Ограничение по токенам
-    total_tokens = 0
-    trimmed_history = []
-    for msg in reversed(history):
-        tokens = count_tokens(msg["content"])
-        if total_tokens + tokens > MAX_TOKENS_HISTORY:
-            break
-        trimmed_history.insert(0, msg)
-        total_tokens += tokens
-
-    chat_histories[chat_id] = trimmed_history
-    save_chat_histories()
+    history = history[-max_messages:]
+    save_chat_history(chat_id, history)
 
 # === Markdown → HTML ===
 def markdown_to_html(text: str) -> str:
@@ -77,23 +58,14 @@ def markdown_to_html(text: str) -> str:
     return text
 
 # === Запрос к OpenRouter ===
-async def query_openrouter(model: str, messages: list, retries=2):
-    payload = {
-        "model": model,
-        "messages": messages
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
+async def query_openrouter(payload, headers, retries=2):
     for attempt in range(retries):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload) as response:
                     return await response.json()
         except Exception as e:
-            logger.warning("Ошибка запроса (%s): %s", model, e)
+            logger.warning("Ошибка запроса: %s", e)
             await asyncio.sleep(1)
 
     return {
@@ -105,27 +77,28 @@ async def query_openrouter(model: str, messages: list, retries=2):
         }]
     }
 
-# === Основной запрос к ИИ с fallback ===
+# === Основной запрос к ИИ ===
 async def ask_model(chat_id: str, user_text: str) -> str:
     append_to_history(chat_id, "user", user_text)
-    history = chat_histories.get(chat_id, [])
 
-    # 1. Пробуем основную модель
-    response = await query_openrouter(PRIMARY_MODEL, history)
-    content = response["choices"][0]["message"]["content"].strip()
+    history = load_chat_history(chat_id)
 
-    if not content:
-        logger.warning("DeepSeek вернул пустой ответ, пробуем fallback модель...")
-        # 2. Пробуем резервную модель
-        fallback_response = await query_openrouter(FALLBACK_MODEL, history)
-        content = fallback_response["choices"][0]["message"]["content"].strip()
+    payload = {
+        "model": "deepseek/deepseek-r1:free",
+        "messages": history,
+        "max_tokens": 1024
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-        if not content:
-            logger.error("Обе модели вернули пустой ответ.")
-            return "Ответ пуст. Пожалуйста, повторите вопрос."
+    response = await query_openrouter(payload, headers)
+    content = response["choices"][0]["message"]["content"]
 
-        append_to_history(chat_id, "assistant", content)
-        return markdown_to_html(content)
+    if not content.strip():
+        logger.warning("Модель вернула пустой ответ. Full raw response: %s", response)
+        return "Ответ пуст. Пожалуйста, повторите вопрос."
 
     append_to_history(chat_id, "assistant", content)
     return markdown_to_html(content)
@@ -153,8 +126,6 @@ async def handle_health(request):
 
 # === Запуск бота ===
 async def run():
-    load_chat_histories()
-
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_update))
 
