@@ -21,6 +21,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 PORT = int(os.getenv("PORT", "8080"))
 WEBHOOK_PATH = "/webhook"
 HISTORY_FILE = "chat_histories.json"
+MAX_TOKENS = 500  # Ограничение на количество токенов в ответе
 
 if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     logger.error("TELEGRAM_BOT_TOKEN or OPENROUTER_API_KEY is not set in environment variables")
@@ -82,7 +83,8 @@ async def ask_model(chat_id: str, user_text: str) -> str:
 
     payload = {
         "model": "deepseek/deepseek-r1:free",
-        "messages": chat_histories.get(chat_id, [])
+        "messages": chat_histories.get(chat_id, []),
+        "max_tokens": MAX_TOKENS  # Добавлено ограничение токенов
     }
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
