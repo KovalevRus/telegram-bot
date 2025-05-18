@@ -80,28 +80,45 @@ async def query_openrouter(payload, headers, retries=2):
 # === Основной запрос к ИИ ===
 async def ask_model(chat_id: str, user_text: str) -> str:
     append_to_history(chat_id, "user", user_text)
-
     history = load_chat_history(chat_id)
 
-    payload = {
-        "model": "deepseek/deepseek-r1:free",
-        "messages": history,
-        "max_tokens": 1024
-    }
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    response = await query_openrouter(payload, headers)
-    content = response["choices"][0]["message"]["content"]
+    # Список моделей: первая — дефолтная, остальные — fallback
+    models = [
+        ("deepseek/deepseek-r1:free", "DeepSeek"),
+        ("openai/gpt-3.5-turbo", "GPT-3.5"),
+        ("meta-llama/llama-3-8b-instruct", "LLaMA 3 8B"),
+        ("google/gemini-pro", "Gemini Pro"),
+        ("anthropic/claude-3-haiku", "Claude 3 Haiku")
+    ]
 
-    if not content.strip():
-        logger.warning("Модель вернула пустой ответ. Full raw response: %s", response)
-        return "Ответ пуст. Пожалуйста, повторите вопрос."
+    for model_name, model_label in models:
+        payload = {
+            "model": model_name,
+            "messages": history,
+            "max_tokens": 1024
+        }
 
-    append_to_history(chat_id, "assistant", content)
-    return markdown_to_html(content)
+        response = await query_openrouter(payload, headers)
+        content = response["choices"][0]["message"]["content"]
+
+        if content.strip():
+            logger.info(f"Ответ получен от модели {model_label}")
+            append_to_history(chat_id, "assistant", content)
+            # Добавим подпись в ответ (можно отключить, если не нужно)
+            # content += f"\n\n<i>🤖 Ответ сгенерирован моделью: {model_label}</i>"
+            return markdown_to_html(content)
+
+        logger.warning(f"Модель {model_label} вернула пустой ответ.")
+
+    # Если все модели не сработали
+    logger.error("Ни одна из моделей не сгенерировала ответ.")
+    return "Ответ пуст. Пожалуйста, повторите вопрос."
+
 
 # === Обработка входящих сообщений ===
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
