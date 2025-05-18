@@ -15,7 +15,7 @@ load_dotenv()
 
 # === ЛОГИ ===
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -57,17 +57,28 @@ def markdown_to_html(text: str) -> str:
     text = re.sub(r"\[([^\]]+)]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
     return text
 
-# === Запрос к OpenRouter ===
+# === Запрос к OpenRouter с логированием ошибок ===
 async def query_openrouter(payload, headers, retries=2):
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
     for attempt in range(retries):
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload) as response:
-                    return await response.json()
+                async with session.post(url, headers=headers, json=payload) as response:
+                    status = response.status
+                    text = await response.text()
+
+                    if status != 200:
+                        logger.warning(f"OpenRouter ответил с кодом {status}: {text}")
+                    else:
+                        logger.debug(f"Успешный ответ от OpenRouter (код {status})")
+
+                    return json.loads(text)
         except Exception as e:
-            logger.warning("Ошибка запроса: %s", e)
+            logger.exception(f"Ошибка запроса к OpenRouter (попытка {attempt + 1}): {e}")
             await asyncio.sleep(1)
 
+    logger.error("Все попытки запроса к OpenRouter завершились неудачей.")
     return {
         "choices": [{
             "message": {
@@ -77,26 +88,25 @@ async def query_openrouter(payload, headers, retries=2):
         }]
     }
 
-# === Основной запрос к ИИ ===
+# === Основной запрос к ИИ с fallback ===
 async def ask_model(chat_id: str, user_text: str) -> str:
     append_to_history(chat_id, "user", user_text)
     history = load_chat_history(chat_id)
+
+    models = [
+        ("DeepSeek", "deepseek/deepseek-r1:free"),
+        ("Mixtral", "mistralai/mixtral-8x7b:free"),
+        ("GPT-3.5", "openai/gpt-3.5-turbo:free")
+    ]
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # Список моделей: первая — дефолтная, остальные — fallback
-    models = [
-        ("deepseek/deepseek-r1:free", "DeepSeek"),
-        ("openai/gpt-3.5-turbo", "GPT-3.5"),
-        ("meta-llama/llama-3-8b-instruct", "LLaMA 3 8B"),
-        ("google/gemini-pro", "Gemini Pro"),
-        ("anthropic/claude-3-haiku", "Claude 3 Haiku")
-    ]
+    for model_label, model_name in models:
+        logger.info(f"Попытка запроса через {model_label} ({model_name})")
 
-    for model_name, model_label in models:
         payload = {
             "model": model_name,
             "messages": history,
@@ -104,20 +114,29 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         }
 
         response = await query_openrouter(payload, headers)
-        content = response["choices"][0]["message"]["content"]
 
-        if content.strip():
-            logger.info(f"Ответ получен от модели {model_label}")
+        if not response:
+            logger.warning(f"{model_label} — нет ответа от OpenRouter.")
+            continue
+
+        # Подробный вывод ответа в лог
+        logger.debug(f"Ответ от модели {model_label}: {json.dumps(response, indent=2, ensure_ascii=False)}")
+
+        try:
+            content = response["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as e:
+            logger.warning(f"{model_label} — некорректный формат ответа: {e}")
+            continue
+
+        if content and content.strip():
+            logger.info(f"{model_label} успешно дал ответ.")
             append_to_history(chat_id, "assistant", content)
-            # Добавим подпись в ответ (можно отключить, если не нужно)
-            # content += f"\n\n<i>🤖 Ответ сгенерирован моделью: {model_label}</i>"
             return markdown_to_html(content)
 
-        logger.warning(f"Модель {model_label} вернула пустой ответ.")
+        logger.warning(f"{model_label} — ответ пуст.")
 
-    # Если все модели не сработали
-    logger.error("Ни одна из моделей не сгенерировала ответ.")
-    return "Ответ пуст. Пожалуйста, повторите вопрос."
+    return "Извините, ни одна модель не смогла ответить. Пожалуйста, повторите позже."
+
 
 
 # === Обработка входящих сообщений ===
