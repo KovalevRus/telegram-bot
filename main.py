@@ -21,7 +21,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 PORT = int(os.getenv("PORT", "8080"))
 WEBHOOK_PATH = "/webhook"
 HISTORY_FILE = "chat_histories.json"
-MAX_TOKENS = 500  # Ограничение на количество токенов в ответе
+MAX_TOKENS = 600  # Ограничение на количество токенов в ответе
 
 if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     logger.error("TELEGRAM_BOT_TOKEN or OPENROUTER_API_KEY is not set in environment variables")
