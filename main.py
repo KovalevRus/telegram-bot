@@ -8,8 +8,8 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import aiohttp
 import re
 import json
-import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import firestore
+from firebase_config_loader import initialize_firebase
 
 # === ЛОГИ ===
 logging.basicConfig(
@@ -28,8 +28,7 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     exit(1)
 
 # === Firestore ===
-cred = credentials.Certificate("telegram-bot-8890a-firebase-adminsdk-fbsvc-38e5c4d984.json")
-firebase_admin.initialize_app(cred)
+initialize_firebase()
 db = firestore.client()
 
 # === ИСТОРИЯ ===
