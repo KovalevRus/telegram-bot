@@ -8,8 +8,10 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import aiohttp
 import re
 import json
-
 from firebase_config_loader import initialize_firebase
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # === ЛОГИ ===
 logging.basicConfig(
