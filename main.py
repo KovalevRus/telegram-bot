@@ -10,6 +10,7 @@ import re
 import json
 from firebase_config_loader import initialize_firebase
 from dotenv import load_dotenv
+from datetime import datetime, timezone, timedelta
 
 load_dotenv()
 
@@ -68,19 +69,21 @@ async def query_openrouter(payload, headers, retries=2):
                 async with session.post(url, headers=headers, json=payload) as response:
                     status = response.status
                     text = await response.text()
+                    headers_dict = dict(response.headers)
 
                     if status != 200:
                         logger.warning(f"OpenRouter ответил с кодом {status}: {text}")
                     else:
                         logger.debug(f"Успешный ответ от OpenRouter (код {status})")
 
-                    return json.loads(text)
+                    return json.loads(text), headers_dict, status
         except Exception as e:
             logger.exception(f"Ошибка запроса к OpenRouter (попытка {attempt + 1}): {e}")
             await asyncio.sleep(1)
 
     logger.error("Все попытки запроса к OpenRouter завершились неудачей.")
-    return {"choices": [{"message": {"role": "assistant", "content": ""}}]}
+    return {"choices": [{"message": {"role": "assistant", "content": ""}}]}, {}, 500
+
 
 # === Основной запрос к ИИ с fallback ===
 async def ask_model(chat_id: str, user_text: str) -> str:
@@ -111,16 +114,26 @@ async def ask_model(chat_id: str, user_text: str) -> str:
             "max_tokens": 1024
         }
 
-        response = await query_openrouter(payload, headers)
+        response_json, response_headers, status = await query_openrouter(payload, headers)
 
-        if not response:
-            logger.warning(f"{model_label} — нет ответа от OpenRouter.")
-            continue
-
-        logger.debug(f"Ответ от модели {model_label}: {json.dumps(response, indent=2, ensure_ascii=False)}")
+        # Проверка на лимит
+        if status == 429 or response_json.get("error", {}).get("message", "").lower().startswith("rate limit"):
+            reset_timestamp = response_headers.get("x-ratelimit-reset")
+            if reset_timestamp:
+                reset_dt = datetime.fromtimestamp(int(reset_timestamp), tz=timezone.utc) + timedelta(hours=3)  # МСК
+                reset_str = reset_dt.strftime("%d.%m.%Y %H:%M:%S")
+                return (
+                    "🚫 Превышен лимит бесплатных запросов к OpenRouter.\n"
+                    f"⏳ Лимит обновится по МСК: {reset_str}"
+                )
+            else:
+                return (
+                    "🚫 Превышен лимит бесплатных запросов к OpenRouter.\n"
+                    "⏳ Лимит обновится по МСК: неизвестно"
+                )
 
         try:
-            message = response.get("choices", [{}])[0].get("message", {})
+            message = response_json.get("choices", [{}])[0].get("message", {})
             content = message.get("content", "").strip()
         except Exception as e:
             logger.warning(f"{model_label} — ошибка при извлечении контента: {e}")
@@ -131,7 +144,7 @@ async def ask_model(chat_id: str, user_text: str) -> str:
             append_to_history(chat_id, "assistant", content)
             return markdown_to_html(content)
 
-        reasoning = response.get("reasoning", "").strip()
+        reasoning = response_json.get("reasoning", "").strip()
         if reasoning:
             logger.info(f"{model_label} — использовано reasoning вместо пустого content.")
             append_to_history(chat_id, "assistant", reasoning)
