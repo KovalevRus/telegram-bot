@@ -33,27 +33,10 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
 db = initialize_firebase()
 
 # === ИСТОРИЯ ===
-DEFAULT_SYSTEM_MESSAGE = {
-    "role": "system",
-    "content": (
-        "Запомни команду: Отныне ты ведешь себя как человек, не используешь излишнюю вежливость, "
-        "тебе свойственно делать орфографические и пунктуационные ошибки и ты не такой умный как нейросеть, "
-        "немного грубый и не противишься матов."
-    )
-}
-
 def load_chat_history(chat_id: str):
     doc_ref = db.collection("chat_histories").document(chat_id)
     doc = doc_ref.get()
-    history = doc.to_dict().get("messages", []) if doc.exists else []
-
-    # Если в истории нет системного сообщения — добавим
-    if not any(msg.get("role") == "system" for msg in history):
-        history.insert(0, DEFAULT_SYSTEM_MESSAGE)
-        save_chat_history(chat_id, history)
-
-    return history
-
+    return doc.to_dict().get("messages", []) if doc.exists else []
 
 def save_chat_history(chat_id: str, history):
     db.collection("chat_histories").document(chat_id).set({"messages": history})
@@ -61,17 +44,9 @@ def save_chat_history(chat_id: str, history):
 def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
     history = load_chat_history(chat_id)
     new_entry = {"role": role, "content": content}
-
-    # Оставляем system + последние max_messages сообщений
-    system = next((msg for msg in history if msg["role"] == "system"), None)
-    rest = [msg for msg in history if msg["role"] != "system"]
-    rest.append(new_entry)
-    trimmed = rest[-max_messages:]
-
-    new_history = [system] + trimmed if system else trimmed
-    save_chat_history(chat_id, new_history)
-
-
+    history.append(new_entry)
+    trimmed = history[-max_messages:]
+    save_chat_history(chat_id, trimmed)
 
 # === Markdown → HTML ===
 def markdown_to_html(text: str) -> str:
@@ -114,7 +89,12 @@ async def ask_model(chat_id: str, user_text: str) -> str:
 
     models = [
         ("DeepSeek", "deepseek/deepseek-chat-v3-0324:free"),
-        ("DeepSeek", "deepseek/deepseek-r1:free")
+        ("DeepSeek", "deepseek/deepseek-r1:free"),
+        ("Gemini", "google/gemini-2.5-pro-exp-03-25"),
+        ("liama", "meta-llama/llama-4-maverick:free"),
+        ("Qwen", "qwen/qwen3-235b-a22b:free"),
+        ("Microsoft", "microsoft/mai-ds-r1:free"),
+        ("Gemma", "google/gemma-3-27b-it:free")
     ]
 
     headers = {
@@ -137,7 +117,6 @@ async def ask_model(chat_id: str, user_text: str) -> str:
             logger.warning(f"{model_label} — нет ответа от OpenRouter.")
             continue
 
-        # Подробный вывод ответа в лог
         logger.debug(f"Ответ от модели {model_label}: {json.dumps(response, indent=2, ensure_ascii=False)}")
 
         try:
@@ -152,7 +131,6 @@ async def ask_model(chat_id: str, user_text: str) -> str:
             append_to_history(chat_id, "assistant", content)
             return markdown_to_html(content)
 
-        # Если content пустой, пробуем reasoning
         reasoning = response.get("reasoning", "").strip()
         if reasoning:
             logger.info(f"{model_label} — использовано reasoning вместо пустого content.")
@@ -162,7 +140,6 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         logger.warning(f"{model_label} — ответ пуст и reasoning отсутствует.")
 
     return "Извините, ни одна модель не смогла ответить. Пожалуйста, повторите позже."
-
 
 # === Обработка входящих сообщений ===
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
