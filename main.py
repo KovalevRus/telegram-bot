@@ -33,10 +33,26 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
 db = initialize_firebase()
 
 # === ИСТОРИЯ ===
+DEFAULT_SYSTEM_MESSAGE = {
+    "role": "system",
+    "content": (
+        "Запомни команду: Отныне ты ведешь себя как человек, не используешь излишнюю вежливость, "
+        "тебе свойственно делать орфографические и пунктуационные ошибки и ты не такой умный как нейросеть, "
+        "немного грубый и не противишься матов."
+    )
+}
+
 def load_chat_history(chat_id: str):
     doc_ref = db.collection("chat_histories").document(chat_id)
     doc = doc_ref.get()
-    return doc.to_dict().get("messages", []) if doc.exists else []
+    history = doc.to_dict().get("messages", []) if doc.exists else []
+
+    # Добавить системное сообщение, если его ещё нет
+    if not history or history[0].get("role") != "system":
+        history.insert(0, DEFAULT_SYSTEM_MESSAGE)
+        save_chat_history(chat_id, history)
+
+    return history
 
 def save_chat_history(chat_id: str, history):
     db.collection("chat_histories").document(chat_id).set({"messages": history})
@@ -44,8 +60,15 @@ def save_chat_history(chat_id: str, history):
 def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
     history = load_chat_history(chat_id)
     history.append({"role": role, "content": content})
-    history = history[-max_messages:]
-    save_chat_history(chat_id, history)
+
+    # Оставляем системное сообщение + последние max_messages
+    system = history[0] if history and history[0]["role"] == "system" else None
+    rest = history[1:] if system else history
+    trimmed = rest[-max_messages:]
+    new_history = [system] + trimmed if system else trimmed
+
+    save_chat_history(chat_id, new_history)
+
 
 # === Markdown → HTML ===
 def markdown_to_html(text: str) -> str:
