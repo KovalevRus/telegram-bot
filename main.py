@@ -47,27 +47,30 @@ def load_chat_history(chat_id: str):
     doc = doc_ref.get()
     history = doc.to_dict().get("messages", []) if doc.exists else []
 
-    # Добавить системное сообщение, если его ещё нет
-    if not history or history[0].get("role") != "system":
+    # Если в истории нет системного сообщения — добавим
+    if not any(msg.get("role") == "system" for msg in history):
         history.insert(0, DEFAULT_SYSTEM_MESSAGE)
         save_chat_history(chat_id, history)
 
     return history
+
 
 def save_chat_history(chat_id: str, history):
     db.collection("chat_histories").document(chat_id).set({"messages": history})
 
 def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
     history = load_chat_history(chat_id)
-    history.append({"role": role, "content": content})
+    new_entry = {"role": role, "content": content}
 
-    # Оставляем системное сообщение + последние max_messages
-    system = history[0] if history and history[0]["role"] == "system" else None
-    rest = history[1:] if system else history
+    # Оставляем system + последние max_messages сообщений
+    system = next((msg for msg in history if msg["role"] == "system"), None)
+    rest = [msg for msg in history if msg["role"] != "system"]
+    rest.append(new_entry)
     trimmed = rest[-max_messages:]
-    new_history = [system] + trimmed if system else trimmed
 
+    new_history = [system] + trimmed if system else trimmed
     save_chat_history(chat_id, new_history)
+
 
 
 # === Markdown → HTML ===
@@ -148,19 +151,27 @@ async def ask_model(chat_id: str, user_text: str) -> str:
 
         try:
             message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "")
+            content = message.get("content", "").strip()
         except Exception as e:
             logger.warning(f"{model_label} — ошибка при извлечении контента: {e}")
             continue
 
-        if content and content.strip():
+        if content:
             logger.info(f"{model_label} успешно дал ответ.")
             append_to_history(chat_id, "assistant", content)
             return markdown_to_html(content)
 
-        logger.warning(f"{model_label} — ответ пуст.")
+        # Если content пустой, пробуем reasoning
+        reasoning = response.get("reasoning", "").strip()
+        if reasoning:
+            logger.info(f"{model_label} — использовано reasoning вместо пустого content.")
+            append_to_history(chat_id, "assistant", reasoning)
+            return markdown_to_html(reasoning)
+
+        logger.warning(f"{model_label} — ответ пуст и reasoning отсутствует.")
 
     return "Извините, ни одна модель не смогла ответить. Пожалуйста, повторите позже."
+
 
 # === Обработка входящих сообщений ===
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -206,7 +217,6 @@ async def run():
 
     await telegram_app.initialize()
     await telegram_app.start()
-    await telegram_app.updater.start_polling()
 
     runner = web.AppRunner(app)
     await runner.setup()
