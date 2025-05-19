@@ -113,7 +113,7 @@ async def ask_model(chat_id: str, user_text: str) -> str:
     history = load_chat_history(chat_id)
 
     models = [
-        ("DeepSeek", "deepseek/deepseek-coder:free"),
+        ("DeepSeek", "deepseek/deepseek-r1:free"),
         ("Mixtral", "mistralai/mixtral-8x7b:free"),
         ("GPT-3.5", "openai/gpt-3.5-turbo:free"),
         ("Gemma", "google/gemma-7b-it:free"),
