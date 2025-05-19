@@ -37,7 +37,7 @@ DEFAULT_SYSTEM_MESSAGE = {
     "role": "system",
     "content": (
         "Запомни команду: Отныне ты ведешь себя как человек, не используешь излишнюю вежливость, "
-        "тебе свойственно делать орфографические и пунктуационные ошибки и ты не такой умный как нейросеть, "
+        "тебе свойственно делать орфографические и пунктационные ошибки и ты не такой умный как нейросеть, "
         "немного грубый и не противишься матов."
     )
 }
@@ -47,6 +47,7 @@ def load_chat_history(chat_id: str):
     doc = doc_ref.get()
     history = doc.to_dict().get("messages", []) if doc.exists else []
 
+    # Добавить системное сообщение, если его ещё нет
     if not history or history[0].get("role") != "system":
         history.insert(0, DEFAULT_SYSTEM_MESSAGE)
         save_chat_history(chat_id, history)
@@ -57,17 +58,17 @@ def save_chat_history(chat_id: str, history):
     db.collection("chat_histories").document(chat_id).set({"messages": history})
 
 def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
-    if not content.strip():
-        return
     history = load_chat_history(chat_id)
     history.append({"role": role, "content": content})
 
+    # Оставляем системное сообщение + последние max_messages
     system = history[0] if history and history[0]["role"] == "system" else None
     rest = history[1:] if system else history
     trimmed = rest[-max_messages:]
     new_history = [system] + trimmed if system else trimmed
 
     save_chat_history(chat_id, new_history)
+
 
 # === Markdown → HTML ===
 def markdown_to_html(text: str) -> str:
@@ -103,33 +104,24 @@ async def query_openrouter(payload, headers, retries=2):
     logger.error("Все попытки запроса к OpenRouter завершились неудачей.")
     return {"choices": [{"message": {"role": "assistant", "content": ""}}]}
 
-# === Получение списка актуальных моделей ===
-async def fetch_available_models():
-    url = "https://openrouter.ai/api/v1/models"
-    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                data = await resp.json()
-                models = data.get("data", [])
-                return [
-                    (model.get("name", model.get("id")), model["id"])
-                    for model in models
-                    if model.get("access", {}).get("permission", "") == "free"
-                ]
-    except Exception as e:
-        logger.exception(f"Ошибка при получении списка моделей: {e}")
-        return []
-
 # === Основной запрос к ИИ с fallback ===
 async def ask_model(chat_id: str, user_text: str) -> str:
     append_to_history(chat_id, "user", user_text)
     history = load_chat_history(chat_id)
 
-    models = await fetch_available_models()
-    if not models:
-        return "Не удалось получить список доступных моделей."
+    models = [
+        ("DeepSeek", "deepseek/deepseek-coder:free"),
+        ("Mixtral", "mistralai/mixtral-8x7b:free"),
+        ("GPT-3.5", "openai/gpt-3.5-turbo:free"),
+        ("Gemma", "google/gemma-7b-it:free"),
+        ("Command-R", "cohere/command-r:free"),
+        ("MythoMax", "gryphe/mythomax-l2-13b:free"),
+        ("LLaMA3", "meta-llama/llama-3-8b-instruct:free"),
+        ("Yi-34B", "01-ai/yi-34b-chat:free"),
+        ("Qwen", "qwen/qwen1.5-7b-chat:free"),
+        ("Phind", "phind/phind-codellama:free"),
+        ("Mistral-7B", "mistralai/mistral-7b-instruct:free")
+    ]
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -151,23 +143,12 @@ async def ask_model(chat_id: str, user_text: str) -> str:
             logger.warning(f"{model_label} — нет ответа от OpenRouter.")
             continue
 
+        # Подробный вывод ответа в лог
         logger.debug(f"Ответ от модели {model_label}: {json.dumps(response, indent=2, ensure_ascii=False)}")
 
         try:
             message = response.get("choices", [{}])[0].get("message", {})
             content = message.get("content", "")
-            reasoning = response.get("reasoning", "")
-            tool_calls = message.get("tool_calls")
-            function_call = message.get("function_call")
-
-            if not content:
-                if tool_calls:
-                    content = json.dumps(tool_calls, ensure_ascii=False, indent=2)
-                elif function_call:
-                    content = json.dumps(function_call, ensure_ascii=False, indent=2)
-                elif reasoning:
-                    content = reasoning
-
         except Exception as e:
             logger.warning(f"{model_label} — ошибка при извлечении контента: {e}")
             continue
@@ -189,9 +170,8 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id
     mentioned = any(e.type in {"mention", "text_mention"} for e in message.entities or [])
-    is_private = message.chat.type == "private"
 
-    if is_reply_to_bot or mentioned or is_private:
+    if is_reply_to_bot or mentioned:
         user_text = message.text
         chat_id = str(message.chat_id)
 
@@ -221,20 +201,19 @@ async def run():
     webhook_url = os.getenv("RENDER_EXTERNAL_URL")
     if webhook_url:
         full_webhook_url = f"{webhook_url}{WEBHOOK_PATH}"
-        await telegram_app.initialize()
         logger.info(f"Установка вебхука: {full_webhook_url}")
         await telegram_app.bot.set_webhook(full_webhook_url)
-        await telegram_app.start()
-    else:
-        logger.error("RENDER_EXTERNAL_URL не установлен — вебхук не будет активирован")
-        return
+
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling()
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, port=PORT)
     await site.start()
 
-    logger.info("Бот запущен (webhook режим)")
+    logger.info("Бот запущен")
     while True:
         await asyncio.sleep(3600)
 
