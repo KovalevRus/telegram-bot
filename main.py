@@ -79,14 +79,7 @@ async def query_openrouter(payload, headers, retries=2):
             await asyncio.sleep(1)
 
     logger.error("Все попытки запроса к OpenRouter завершились неудачей.")
-    return {
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": ""
-            }
-        }]
-    }
+    return {"choices": [{"message": {"role": "assistant", "content": ""}}]}
 
 # === Основной запрос к ИИ с fallback ===
 async def ask_model(chat_id: str, user_text: str) -> str:
@@ -94,9 +87,17 @@ async def ask_model(chat_id: str, user_text: str) -> str:
     history = load_chat_history(chat_id)
 
     models = [
-        ("DeepSeek", "deepseek/deepseek-r1:free"),
+        ("DeepSeek", "deepseek/deepseek-coder:free"),
         ("Mixtral", "mistralai/mixtral-8x7b:free"),
-        ("GPT-3.5", "openai/gpt-3.5-turbo:free")
+        ("GPT-3.5", "openai/gpt-3.5-turbo:free"),
+        ("Gemma", "google/gemma-7b-it:free"),
+        ("Command-R", "cohere/command-r:free"),
+        ("MythoMax", "gryphe/mythomax-l2-13b:free"),
+        ("LLaMA3", "meta-llama/llama-3-8b-instruct:free"),
+        ("Yi-34B", "01-ai/yi-34b-chat:free"),
+        ("Qwen", "qwen/qwen1.5-7b-chat:free"),
+        ("Phind", "phind/phind-codellama:free"),
+        ("Mistral-7B", "mistralai/mistral-7b-instruct:free")
     ]
 
     headers = {
@@ -123,9 +124,10 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         logger.debug(f"Ответ от модели {model_label}: {json.dumps(response, indent=2, ensure_ascii=False)}")
 
         try:
-            content = response["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as e:
-            logger.warning(f"{model_label} — некорректный формат ответа: {e}")
+            message = response.get("choices", [{}])[0].get("message", {})
+            content = message.get("content", "")
+        except Exception as e:
+            logger.warning(f"{model_label} — ошибка при извлечении контента: {e}")
             continue
 
         if content and content.strip():
@@ -136,8 +138,6 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         logger.warning(f"{model_label} — ответ пуст.")
 
     return "Извините, ни одна модель не смогла ответить. Пожалуйста, повторите позже."
-
-
 
 # === Обработка входящих сообщений ===
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
