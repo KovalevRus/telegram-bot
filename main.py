@@ -57,6 +57,8 @@ def save_chat_history(chat_id: str, history):
     db.collection("chat_histories").document(chat_id).set({"messages": history})
 
 def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
+    if not content.strip():
+        return
     history = load_chat_history(chat_id)
     history.append({"role": role, "content": content})
 
@@ -154,6 +156,18 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         try:
             message = response.get("choices", [{}])[0].get("message", {})
             content = message.get("content", "")
+            reasoning = response.get("reasoning", "")
+            tool_calls = message.get("tool_calls")
+            function_call = message.get("function_call")
+
+            if not content:
+                if tool_calls:
+                    content = json.dumps(tool_calls, ensure_ascii=False, indent=2)
+                elif function_call:
+                    content = json.dumps(function_call, ensure_ascii=False, indent=2)
+                elif reasoning:
+                    content = reasoning
+
         except Exception as e:
             logger.warning(f"{model_label} — ошибка при извлечении контента: {e}")
             continue
@@ -163,13 +177,7 @@ async def ask_model(chat_id: str, user_text: str) -> str:
             append_to_history(chat_id, "assistant", content)
             return markdown_to_html(content)
 
-        reason = response.get("reason")
-        if reason:
-            logger.warning(f"{model_label} — content пуст, но есть reason: {reason}")
-            append_to_history(chat_id, "assistant", reason)
-            return markdown_to_html(reason)
-
-        logger.warning(f"{model_label} — ответ пуст и reason отсутствует.")
+        logger.warning(f"{model_label} — ответ пуст.")
 
     return "Извините, ни одна модель не смогла ответить. Пожалуйста, повторите позже."
 
@@ -181,8 +189,9 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id
     mentioned = any(e.type in {"mention", "text_mention"} for e in message.entities or [])
+    is_private = message.chat.type == "private"
 
-    if is_reply_to_bot or mentioned:
+    if is_reply_to_bot or mentioned or is_private:
         user_text = message.text
         chat_id = str(message.chat_id)
 
@@ -212,19 +221,20 @@ async def run():
     webhook_url = os.getenv("RENDER_EXTERNAL_URL")
     if webhook_url:
         full_webhook_url = f"{webhook_url}{WEBHOOK_PATH}"
+        await telegram_app.initialize()
         logger.info(f"Установка вебхука: {full_webhook_url}")
         await telegram_app.bot.set_webhook(full_webhook_url)
-
-    await telegram_app.initialize()
-    await telegram_app.start()
-    await telegram_app.updater.start_polling()
+        await telegram_app.start()
+    else:
+        logger.error("RENDER_EXTERNAL_URL не установлен — вебхук не будет активирован")
+        return
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, port=PORT)
     await site.start()
 
-    logger.info("Бот запущен")
+    logger.info("Бот запущен (webhook режим)")
     while True:
         await asyncio.sleep(3600)
 
