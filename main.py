@@ -47,7 +47,6 @@ def load_chat_history(chat_id: str):
     doc = doc_ref.get()
     history = doc.to_dict().get("messages", []) if doc.exists else []
 
-    # Добавить системное сообщение, если его ещё нет
     if not history or history[0].get("role") != "system":
         history.insert(0, DEFAULT_SYSTEM_MESSAGE)
         save_chat_history(chat_id, history)
@@ -61,14 +60,12 @@ def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
     history = load_chat_history(chat_id)
     history.append({"role": role, "content": content})
 
-    # Оставляем системное сообщение + последние max_messages
     system = history[0] if history and history[0]["role"] == "system" else None
     rest = history[1:] if system else history
     trimmed = rest[-max_messages:]
     new_history = [system] + trimmed if system else trimmed
 
     save_chat_history(chat_id, new_history)
-
 
 # === Markdown → HTML ===
 def markdown_to_html(text: str) -> str:
@@ -104,24 +101,33 @@ async def query_openrouter(payload, headers, retries=2):
     logger.error("Все попытки запроса к OpenRouter завершились неудачей.")
     return {"choices": [{"message": {"role": "assistant", "content": ""}}]}
 
+# === Получение списка актуальных моделей ===
+async def fetch_available_models():
+    url = "https://openrouter.ai/api/v1/models"
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                data = await resp.json()
+                models = data.get("data", [])
+                return [
+                    (model.get("name", model.get("id")), model["id"])
+                    for model in models
+                    if model.get("access", {}).get("permission", "") == "free"
+                ]
+    except Exception as e:
+        logger.exception(f"Ошибка при получении списка моделей: {e}")
+        return []
+
 # === Основной запрос к ИИ с fallback ===
 async def ask_model(chat_id: str, user_text: str) -> str:
     append_to_history(chat_id, "user", user_text)
     history = load_chat_history(chat_id)
 
-    models = [
-        ("DeepSeek", "deepseek/deepseek-coder:free"),
-        ("Mixtral", "mistralai/mixtral-8x7b:free"),
-        ("GPT-3.5", "openai/gpt-3.5-turbo:free"),
-        ("Gemma", "google/gemma-7b-it:free"),
-        ("Command-R", "cohere/command-r:free"),
-        ("MythoMax", "gryphe/mythomax-l2-13b:free"),
-        ("LLaMA3", "meta-llama/llama-3-8b-instruct:free"),
-        ("Yi-34B", "01-ai/yi-34b-chat:free"),
-        ("Qwen", "qwen/qwen1.5-7b-chat:free"),
-        ("Phind", "phind/phind-codellama:free"),
-        ("Mistral-7B", "mistralai/mistral-7b-instruct:free")
-    ]
+    models = await fetch_available_models()
+    if not models:
+        return "Не удалось получить список доступных моделей."
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -143,7 +149,6 @@ async def ask_model(chat_id: str, user_text: str) -> str:
             logger.warning(f"{model_label} — нет ответа от OpenRouter.")
             continue
 
-        # Подробный вывод ответа в лог
         logger.debug(f"Ответ от модели {model_label}: {json.dumps(response, indent=2, ensure_ascii=False)}")
 
         try:
@@ -158,7 +163,13 @@ async def ask_model(chat_id: str, user_text: str) -> str:
             append_to_history(chat_id, "assistant", content)
             return markdown_to_html(content)
 
-        logger.warning(f"{model_label} — ответ пуст.")
+        reason = response.get("reason")
+        if reason:
+            logger.warning(f"{model_label} — content пуст, но есть reason: {reason}")
+            append_to_history(chat_id, "assistant", reason)
+            return markdown_to_html(reason)
+
+        logger.warning(f"{model_label} — ответ пуст и reason отсутствует.")
 
     return "Извините, ни одна модель не смогла ответить. Пожалуйста, повторите позже."
 
