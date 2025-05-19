@@ -71,6 +71,8 @@ async def query_openrouter(payload, headers, retries=2):
                     text = await response.text()
                     headers_dict = dict(response.headers)
 
+                    logger.debug(f"Заголовки ответа OpenRouter: {headers_dict}")
+
                     if status != 200:
                         logger.warning(f"OpenRouter ответил с кодом {status}: {text}")
                     else:
@@ -83,6 +85,7 @@ async def query_openrouter(payload, headers, retries=2):
 
     logger.error("Все попытки запроса к OpenRouter завершились неудачей.")
     return {"choices": [{"message": {"role": "assistant", "content": ""}}]}, {}, 500
+
 
 
 # === Основной запрос к ИИ с fallback ===
