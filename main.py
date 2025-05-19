@@ -120,20 +120,21 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         response_json, response_headers, status = await query_openrouter(payload, headers)
 
         # Проверка на лимит
-        if status == 429 or response_json.get("error", {}).get("message", "").lower().startswith("rate limit"):
-            reset_timestamp = response_headers.get("x-ratelimit-reset")
-            if reset_timestamp:
-                reset_dt = datetime.fromtimestamp(int(reset_timestamp), tz=timezone.utc) + timedelta(hours=3)  # МСК
-                reset_str = reset_dt.strftime("%d.%m.%Y %H:%M:%S")
-                return (
-                    "🚫 Превышен лимит бесплатных запросов к OpenRouter.\n"
-                    f"⏳ Лимит обновится по МСК: {reset_str}"
-                )
-            else:
-                return (
-                    "🚫 Превышен лимит бесплатных запросов к OpenRouter.\n"
-                    "⏳ Лимит обновится по МСК: неизвестно"
-                )
+        if status == 429:
+            logger.warning(f"{model_label} — превышен лимит.")
+            try:
+                reset_raw = response.get("error", {}).get("metadata", {}).get("headers", {}).get("X-RateLimit-Reset")
+                if reset_raw:
+                    reset_timestamp = datetime.utcfromtimestamp(int(reset_raw) / 1000).replace(tzinfo=timezone.utc).astimezone(msk)
+                    reset_time_str = reset_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    reset_time_str = "неизвестно"
+            except Exception as e:
+                logger.warning(f"Не удалось извлечь время сброса лимита: {e}")
+                reset_time_str = "неизвестно"
+        
+            return f"🚫 Превышен лимит бесплатных запросов к OpenRouter.\n⏳ Лимит обновится по МСК: {reset_time_str}"
+
 
         try:
             message = response_json.get("choices", [{}])[0].get("message", {})
