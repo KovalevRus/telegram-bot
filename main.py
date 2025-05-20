@@ -1,3 +1,4 @@
+# main.py
 import os
 import logging
 import asyncio
@@ -42,12 +43,19 @@ def load_chat_history(chat_id: str):
 def save_chat_history(chat_id: str, history):
     db.collection("chat_histories").document(chat_id).set({"messages": history})
 
-def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
+def append_to_history(chat_id: str, role: str, content: str, max_tokens=4096):
     history = load_chat_history(chat_id)
     new_entry = {"role": role, "content": content}
     history.append(new_entry)
-    trimmed = history[-max_messages:]
-    save_chat_history(chat_id, trimmed)
+
+    # Обрезка истории по количеству токенов (примерная оценка)
+    def count_tokens(msgs):
+        return sum(len(m["content"]) // 4 + 4 for m in msgs)
+
+    while count_tokens(history) > max_tokens:
+        history.pop(0)
+
+    save_chat_history(chat_id, history)
 
 # === Markdown → HTML ===
 def markdown_to_html(text: str) -> str:
@@ -102,10 +110,10 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         ("DeepSeek", "deepseek/deepseek-chat-v3-0324:free"),
         ("DeepSeek", "deepseek/deepseek-r1:free"),
         ("Gemini", "google/gemini-2.5-pro-exp-03-25"),
-        ("liama", "meta-llama/llama-4-maverick:free"),
+        ("LLaMA", "meta-llama/llama-4-maverick:free"),
         ("Qwen", "qwen/qwen3-235b-a22b:free"),
         ("Microsoft", "microsoft/mai-ds-r1:free"),
-        ("Gemma", "google/gemma-3-27b-it:free")
+        ("Gemma", "google/gemma-3-27b-it:free"),
     ]
 
     headers = {
