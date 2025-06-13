@@ -5,6 +5,7 @@ from aiohttp import web
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.helpers import escape_markdown
 import aiohttp
 import re
 import json
@@ -192,7 +193,12 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"[{chat_id}] Запрос: {user_text}")
 
         answer = await ask_model(chat_id, user_text)
-        await message.reply_text(answer, parse_mode='MarkdownV2') 
+        logger.info(f"[{chat_id}] Ответ: {answer}")
+
+        # Экранирование MarkdownV2
+        answer_escaped = escape_markdown(answer, version=2)
+
+        await message.reply_text(answer_escaped, parse_mode='MarkdownV2') 
 
 
 # === Хелсчек ===
