@@ -192,7 +192,7 @@ async def ask_model(chat_id: str, user_text: str) -> str:
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message or not message.text:
-        return
+    return
 
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id
     mentioned = any(e.type in {"mention", "text_mention"} for e in message.entities or [])
@@ -200,9 +200,9 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text = message.text
         chat_id = str(message.chat_id)
         logger.info(f"[{chat_id}] Запрос: {user_text}")
-
+    
         answer = await ask_model(chat_id, user_text)
-        await message.reply_text(answer, parse_mode=ParseMode.HTML)
+        await message.reply_text(answer, parse_mode=None)
 
 
 # === Хелсчек ===
