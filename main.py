@@ -200,9 +200,9 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text = message.text
         chat_id = str(message.chat_id)
         logger.info(f"[{chat_id}] Запрос: {user_text}")
-    
+
         answer = await ask_model(chat_id, user_text)
-        await message.reply_text(answer, parse_mode=None)
+        await message.reply_text(answer, parse_mode='HTML')  # ВАЖНЫЙ МОМЕНТ
 
 
 # === Хелсчек ===
