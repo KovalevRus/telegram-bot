@@ -12,6 +12,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
+import telegram.helpers as tg_helpers
 
 load_dotenv()
 
@@ -73,17 +74,6 @@ def append_to_history(chat_id: str, role: str, content: str, max_tokens=4096):
         history.pop(0)
 
     save_chat_history(chat_id, history)
-
-
-# === Markdown → HTML ===
-def markdown_to_html(text: str) -> str:
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
-    text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
-    text = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
-    text = re.sub(r"\[([^\]]+)]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
-    return text
 
 
 # === Запрос к OpenRouter с логированием ===
@@ -166,8 +156,10 @@ async def ask_model(chat_id: str, user_text: str) -> str:
 
         if content:
             logger.info(f"{model_label} выдал ответ.")
+            # Запомним ответ в истории
             append_to_history(chat_id, "assistant", content)
-            return markdown_to_html(content)
+            # Экранируем маркировку для MarkdownV2
+            return tg_helpers.escape_markdown(content, version=2)
 
         reset_raw = response.get("rate_limit_reset")
         if reset_raw:
@@ -202,7 +194,7 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"[{chat_id}] Запрос: {user_text}")
 
         answer = await ask_model(chat_id, user_text)
-        await message.reply_text(answer, parse_mode='HTML')  # ВАЖНЫЙ МОМЕНТ
+        await message.reply_text(answer, parse_mode='MarkdownV2') 
 
 
 # === Хелсчек ===
