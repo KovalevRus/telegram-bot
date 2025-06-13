@@ -10,7 +10,7 @@ import re
 import json
 import firebase_admin
 from firebase_admin import credentials, firestore
-from dotenv import loaddotenv
+from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 
 load_dotenv()
