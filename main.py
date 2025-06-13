@@ -10,9 +10,8 @@ import re
 import json
 import firebase_admin
 from firebase_admin import credentials, firestore
-from dotenv import load_dotenv
+from dotenv import loaddotenv
 from datetime import datetime, timezone, timedelta
-import telegram.helpers as tg_helpers
 
 load_dotenv()
 
@@ -158,8 +157,7 @@ async def ask_model(chat_id: str, user_text: str) -> str:
             logger.info(f"{model_label} выдал ответ.")
             # Запомним ответ в истории
             append_to_history(chat_id, "assistant", content)
-            # Экранируем маркировку для MarkdownV2
-            return tg_helpers.escape_markdown(content, version=2)
+            return content
 
         reset_raw = response.get("rate_limit_reset")
         if reset_raw:
@@ -237,4 +235,4 @@ async def run():
 
 
 if __name__ == "__main__":
-    asyncio.run(run()) 
+    asyncio.run(run())  
