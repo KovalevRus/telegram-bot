@@ -1,4 +1,3 @@
-# main.py
 import os
 import logging
 import asyncio
@@ -36,9 +35,19 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
 
 
 # === Firebase (Admin) ===
-cred = credentials.Certificate("your-serviceAccountKey.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+def initialize_firebase():
+    firebase_key = os.getenv("FIREBASE_CREDENTIALS_JSON")
+    if not firebase_key:
+        logger.error("Environment variable FIREBASE_KEY is missing")
+        exit(1)
+
+    cred = credentials.Certificate(json.loads(firebase_key))
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    return db
+
+
+db = initialize_firebase()
 
 
 # === ИСТОРИЯ ЧАТОВ ===
@@ -56,7 +65,7 @@ def append_to_history(chat_id: str, role: str, content: str, max_tokens=4096):
     new_entry = {"role": role, "content": content}
     history.append(new_entry)
 
-    # Обрезка истории по количеству токенов (примерная)
+    # Обрезка истории по количеству токенов (примерно)
     def count_tokens(msgs):
         return sum(len(m["content"]) // 4 + 4 for m in msgs)
 
