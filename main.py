@@ -5,10 +5,10 @@ from aiohttp import web
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
-from telegram.helpers import escape_markdown
 import aiohttp
 import re
 import json
+from firebase_config_loader import initialize_firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
@@ -18,11 +18,9 @@ load_dotenv()
 
 # === ЛОГИ ===
 logging.basicConfig(
-    format=' %(levelname)-8s %(message)s',
-    level=logging.DEBUG
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG
 )
-logger = logging.getLogger()
-
+logger = logging.getLogger(__name__)
 
 # === КОНФИГ ===
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -33,7 +31,6 @@ WEBHOOK_PATH = "/webhook"
 if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     logger.error("TELEGRAM_BOT_TOKEN or OPENROUTER_API_KEY is not set in environment variables")
     exit(1)
-
 
 # === Firebase (Admin) ===
 def initialize_firebase():
@@ -50,33 +47,33 @@ def initialize_firebase():
 
 db = initialize_firebase()
 
-
-# === ИСТОРИЯ ЧАТОВ ===
+# === ИСТОРИЯ ===
 def load_chat_history(chat_id: str):
-    doc = db.collection("chat_histories").document(chat_id).get()
+    doc_ref = db.collection("chat_histories").document(chat_id)
+    doc = doc_ref.get()
     return doc.to_dict().get("messages", []) if doc.exists else []
-
 
 def save_chat_history(chat_id: str, history):
     db.collection("chat_histories").document(chat_id).set({"messages": history})
 
-
-def append_to_history(chat_id: str, role: str, content: str, max_tokens=4096):
+def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
     history = load_chat_history(chat_id)
     new_entry = {"role": role, "content": content}
     history.append(new_entry)
+    trimmed = history[-max_messages:]
+    save_chat_history(chat_id, trimmed)
 
-    # Обрезка истории по количеству токенов (примерно)
-    def count_tokens(msgs):
-        return sum(len(m["content"]) // 4 + 4 for m in msgs)
+# === Markdown → HTML ===
+def markdown_to_html(text: str) -> str:
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
+    text = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+    text = re.sub(r"\[([^\]]+)]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+    return text
 
-    while count_tokens(history) > max_tokens:
-        history.pop(0)
-
-    save_chat_history(chat_id, history)
-
-
-# === Запрос к OpenRouter с логированием ===
+# === Запрос к OpenRouter с логированием ошибок ===
 async def query_openrouter(payload, headers, retries=2):
     url = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -89,8 +86,8 @@ async def query_openrouter(payload, headers, retries=2):
 
                     if status != 200:
                         logger.warning(f"OpenRouter ответил с кодом {status}: {text}")
-
-                    logger.debug(f"Успешный ответ: {text}")
+                    else:
+                        logger.debug(f"Успешный ответ от OpenRouter (код {status})")
 
                     response_json = json.loads(text)
 
@@ -104,13 +101,13 @@ async def query_openrouter(payload, headers, retries=2):
 
                     return response_json
         except Exception as e:
-            logger.error(f"Ошибка запроса к OpenRouter (попытка {attempt + 1}): {e}")
+            logger.exception(f"Ошибка запроса к OpenRouter (попытка {attempt + 1}): {e}")
             await asyncio.sleep(1)
 
-    logger.error("Все попытки завершились с ошибкой.")
+    logger.error("Все попытки запроса к OpenRouter завершились неудачей.")
     return {"choices": [{"message": {"role": "assistant", "content": ""}}]}
 
-# === Основной процесс с моделями ===
+# === Основной запрос к ИИ с fallback ===
 async def ask_model(chat_id: str, user_text: str) -> str:
     append_to_history(chat_id, "user", user_text)
     history = load_chat_history(chat_id)
@@ -119,10 +116,10 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         ("DeepSeek", "deepseek/deepseek-chat-v3-0324:free"),
         ("DeepSeek", "deepseek/deepseek-r1:free"),
         ("Gemini", "google/gemini-2.5-pro-exp-03-25"),
-        ("LLaMA", "meta-llama/llama-4-maverick:free"),
+        ("liama", "meta-llama/llama-4-maverick:free"),
         ("Qwen", "qwen/qwen3-235b-a22b:free"),
         ("Microsoft", "microsoft/mai-ds-r1:free"),
-        ("Gemma", "google/gemma-3-27b-it:free"),
+        ("Gemma", "google/gemma-3-27b-it:free")
     ]
 
     headers = {
@@ -131,7 +128,7 @@ async def ask_model(chat_id: str, user_text: str) -> str:
     }
 
     for model_label, model_name in models:
-        logger.info(f"Попытка с помощью модели {model_label}")
+        logger.info(f"Попытка запроса через {model_label} ({model_name})")
 
         payload = {
             "model": model_name,
@@ -142,23 +139,28 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         response = await query_openrouter(payload, headers)
 
         if not response:
-            logger.warning(f"{model_label} — нет ответа.")
+            logger.warning(f"{model_label} — нет ответа от OpenRouter.")
             continue
 
-        logger.debug(f"Ответ модели {model_label}: {json.dumps(response, ensure_ascii=False, indent=2)}")
+        logger.debug(f"Ответ от модели {model_label}: {json.dumps(response, indent=2, ensure_ascii=False)}")
 
         try:
             message = response.get("choices", [{}])[0].get("message", {})
             content = message.get("content", "").strip()
         except Exception as e:
-            logger.error(f"Не получилось извлечь текст из ответа: {e}")
+            logger.warning(f"{model_label} — ошибка при извлечении контента: {e}")
             continue
 
         if content:
-            logger.info(f"{model_label} выдал ответ.")
-            # Запомним ответ в истории
+            logger.info(f"{model_label} успешно дал ответ.")
             append_to_history(chat_id, "assistant", content)
-            return content
+            return markdown_to_html(content)
+
+        reasoning = response.get("reasoning", "").strip()
+        if reasoning:
+            logger.info(f"{model_label} — использовано reasoning вместо пустого content.")
+            append_to_history(chat_id, "assistant", reasoning)
+            return markdown_to_html(reasoning)
 
         reset_raw = response.get("rate_limit_reset")
         if reset_raw:
@@ -168,16 +170,15 @@ async def ask_model(chat_id: str, user_text: str) -> str:
                 reset_time_msk = reset_timestamp.replace(tzinfo=timezone.utc).astimezone(msk)
                 reset_time_str = reset_time_msk.strftime("%Y-%m-%d %H:%M:%S")
             except Exception as e:
-                logger.error(f"Не получилось преобразовать время лимита: {e}")
+                logger.warning(f"Не удалось преобразовать время сброса: {e}")
                 reset_time_str = "неизвестно"
         else:
             reset_time_str = "неизвестно"
 
-        logger.warning(f"{model_label} — лимит исчерпан.")
-        return f"🚫 Превышен лимит, следующий лимит сработает в {reset_time_str}"
+        logger.warning(f"{model_label} — превышен лимит.")
+        return f"🚫 Превышен лимит бесплатных запросов к OpenRouter.\n⏳ Лимит обновится по МСК: {reset_time_str}"
 
-    return "Извините, модели сейчас не доступны."
-
+    return "Извините, ни одна модель не смогла ответить. Пожалуйста, повторите позже."
 
 # === Обработка входящих сообщений ===
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,23 +188,18 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id
     mentioned = any(e.type in {"mention", "text_mention"} for e in message.entities or [])
+
     if is_reply_to_bot or mentioned:
         user_text = message.text
         chat_id = str(message.chat_id)
+
         logger.info(f"[{chat_id}] Запрос: {user_text}")
-
         answer = await ask_model(chat_id, user_text)
-        logger.info(f"[{chat_id}] Ответ: {answer}")
-
-        # Экранирование MarkdownV2
-        answer_escaped = escape_markdown(answer, version=2)
-
-        await message.reply_text(answer_escaped, parse_mode='MarkdownV2') 
-
+        await message.reply_text(answer, parse_mode=ParseMode.HTML)
 
 # === Хелсчек ===
 async def handle_health(request):
-    return web.Response(text='OK')
+    return web.Response(text="OK")
 
 # === Запуск бота ===
 async def run():
@@ -211,12 +207,11 @@ async def run():
     telegram_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_update))
 
     app = web.Application()
-
     async def webhook_handler(request):
         data = await request.json()
         update = Update.de_json(data, telegram_app.bot)
         await telegram_app.update_queue.put(update)
-        return web.Response(text='OK')
+        return web.Response(text="OK")
 
     app.router.add_post(WEBHOOK_PATH, webhook_handler)
     app.router.add_get("/", handle_health)
@@ -239,6 +234,5 @@ async def run():
     while True:
         await asyncio.sleep(3600)
 
-
 if __name__ == "__main__":
-    asyncio.run(run())  
+    asyncio.run(run())
