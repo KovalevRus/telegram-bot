@@ -6,3 +6,4 @@ tiktoken
 firebase-admin
 python-dotenv
 markdown2
+bs4
