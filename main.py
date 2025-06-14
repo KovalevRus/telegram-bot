@@ -66,7 +66,18 @@ def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
 
 # === Markdown → HTML ===
 def markdown_to_html(text: str) -> str:
-    return markdown.markdown(text)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
+    text = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+    text = re.sub(r"\[([^\]]+)]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+
+    # В Telegram нельзя p, поэтому убираем их:
+    text = text.replace("<p>", "").replace("</p>", "")
+
+    return text
+
 
 # === Запрос к OpenRouter с логированием ошибок ===
 async def query_openrouter(payload, headers, retries=2):
