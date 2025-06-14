@@ -13,6 +13,7 @@ from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 import markdown2
+from bs4 import BeautifulSoup
 
 load_dotenv()
 
@@ -71,6 +72,45 @@ def markdown_to_html(text: str) -> str:
     html = html.replace("<p>", "").replace("</p>", "")
     html = html.replace("<br>", "\n")
     return html
+
+# === Очистка HTML для Telegram (оставляем поддерживаемое, остальное — в текст) ===
+def clean_html_for_telegram(text: str) -> str:
+    """
+    Преобразовать HTML в текст с HTML-разметкой, совместимой с Telegram.
+    Поддерживаются: <b>, <strong>, <i>, <em>, <code>, <pre>, <a>.
+    Неподдерживаемые теги удаляются, <br> заменяются на переносы строк,
+    списки преобразуются в простой текст с нумерацией или маркерами.
+    """
+    soup = BeautifulSoup(text, "html.parser")
+
+    # Заменяем <br> на перенос строки
+    for br in soup.select("br"):
+        br.replace_with("\n")
+
+    # Обработка упорядоченных списков <ol>
+    for ol in soup.select("ol"):
+        for i, li in enumerate(ol.find_all("li"), start=1):
+            prefix = f"{i}. "
+            li.insert_before(prefix)
+        ol.unwrap()
+
+    # Обработка маркированных списков <ul>
+    for ul in soup.select("ul"):
+        for li in ul.find_all("li"):
+            li.insert_before("- ")
+        ul.unwrap()
+
+    # Список разрешённых тегов (те, что Telegram поддерживает)
+    allowed_tags = ['b', 'strong', 'i', 'em', 'code', 'pre', 'a']
+
+    for tag in soup.find_all():
+        if tag.name not in allowed_tags:
+            tag.unwrap()
+
+    # Возвращаем строку без лишних пробелов в начале/конце
+    cleaned = str(soup).strip()
+
+    return cleaned
 
 # === Запрос к OpenRouter ===
 async def query_openrouter(payload, headers, retries=2):
@@ -143,12 +183,16 @@ async def ask_model(chat_id: str, user_text: str) -> str:
 
         if content:
             append_to_history(chat_id, "assistant", content)
-            return markdown_to_html(content)
+            html = markdown_to_html(content)
+            cleaned = clean_html_for_telegram(html)
+            return cleaned
 
         reasoning = response.get("reasoning", "").strip()
         if reasoning:
             append_to_history(chat_id, "assistant", reasoning)
-            return markdown_to_html(reasoning)
+            html = markdown_to_html(reasoning)
+            cleaned = clean_html_for_telegram(html)
+            return cleaned
 
         reset_raw = response.get("rate_limit_reset")
         if reset_raw:
@@ -183,9 +227,8 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         answer = await ask_model(chat_id, user_text)
 
-        # Заменаем <br> на перенос строки
-        answer = answer.replace("<br>", "\n")
-
+        # В ответе уже заменены неподдерживаемые теги,
+        # поэтому просто отправляем с HTML парсингом.
         await message.reply_text(answer, parse_mode=ParseMode.HTML)
 
 # === Хелсчек ===
@@ -221,9 +264,18 @@ async def run():
     site = web.TCPSite(runner, port=PORT)
     await site.start()
 
-    logger.info("Бот запущен")
-    while True:
-        await asyncio.sleep(3600)
+    logger.info("Бот запущен и слушает запросы")
+
+    # Запуск бота бесконечно
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Завершение работы...")
+    finally:
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+        await runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(run())
