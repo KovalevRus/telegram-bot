@@ -8,12 +8,11 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 import aiohttp
 import re
 import json
-from firebase_config_loader import initialize_firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
-import markdown
+import markdown2
 
 load_dotenv()
 
@@ -33,18 +32,17 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     logger.error("TELEGRAM_BOT_TOKEN or OPENROUTER_API_KEY is not set in environment variables")
     exit(1)
 
-# === Firebase (Admin) ===
+# === Firebase ===
 def initialize_firebase():
     firebase_key = os.getenv("FIREBASE_CREDENTIALS_JSON")
     if not firebase_key:
-        logger.error("Environment variable FIREBASE_KEY is missing")
+        logger.error("Environment variable FIREBASE_CREDENTIALS_JSON is missing")
         exit(1)
 
     cred = credentials.Certificate(json.loads(firebase_key))
     firebase_admin.initialize_app(cred)
     db = firestore.client()
     return db
-
 
 db = initialize_firebase()
 
@@ -59,30 +57,23 @@ def save_chat_history(chat_id: str, history):
 
 def append_to_history(chat_id: str, role: str, content: str, max_messages=20):
     history = load_chat_history(chat_id)
-    new_entry = {"role": role, "content": content}
-    history.append(new_entry)
+    history.append({"role": role, "content": content})
     trimmed = history[-max_messages:]
     save_chat_history(chat_id, trimmed)
 
 # === Markdown → HTML ===
 def markdown_to_html(text: str) -> str:
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
-    text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
-    text = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
-    text = re.sub(r"\[([^\]]+)]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+    html = markdown2.markdown(
+        text,
+        extras=["fenced-code-blocks", "code-friendly"]
+    )
+    # Удаляем <p> теги, которые Telegram не поддерживает
+    html = html.replace("<p>", "").replace("</p>", "")
+    return html
 
-    # В Telegram нельзя p, поэтому убираем их:
-    text = text.replace("<p>", "").replace("</p>", "")
-
-    return text
-
-
-# === Запрос к OpenRouter с логированием ошибок ===
+# === Запрос к OpenRouter ===
 async def query_openrouter(payload, headers, retries=2):
     url = "https://openrouter.ai/api/v1/chat/completions"
-
     for attempt in range(retries):
         try:
             async with aiohttp.ClientSession() as session:
@@ -98,7 +89,6 @@ async def query_openrouter(payload, headers, retries=2):
                     response_json = json.loads(text)
 
                     if status == 429:
-                        logger.warning("Превышен лимит.")
                         reset_raw = response_json.get("error", {}).get("metadata", {}).get("headers", {}).get("X-RateLimit-Reset")
                         return {
                             "choices": [{"message": {"role": "assistant", "content": ""}}],
@@ -113,7 +103,7 @@ async def query_openrouter(payload, headers, retries=2):
     logger.error("Все попытки запроса к OpenRouter завершились неудачей.")
     return {"choices": [{"message": {"role": "assistant", "content": ""}}]}
 
-# === Основной запрос к ИИ с fallback ===
+# === Основной запрос к ИИ ===
 async def ask_model(chat_id: str, user_text: str) -> str:
     append_to_history(chat_id, "user", user_text)
     history = load_chat_history(chat_id)
@@ -122,7 +112,7 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         ("DeepSeek", "deepseek/deepseek-chat-v3-0324:free"),
         ("DeepSeek", "deepseek/deepseek-r1:free"),
         ("Gemini", "google/gemini-2.5-pro-exp-03-25"),
-        ("liama", "meta-llama/llama-4-maverick:free"),
+        ("Llama", "meta-llama/llama-4-maverick:free"),
         ("Qwen", "qwen/qwen3-235b-a22b:free"),
         ("Microsoft", "microsoft/mai-ds-r1:free"),
         ("Gemma", "google/gemma-3-27b-it:free")
@@ -145,26 +135,17 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         response = await query_openrouter(payload, headers)
 
         if not response:
-            logger.warning(f"{model_label} — нет ответа от OpenRouter.")
             continue
 
-        logger.debug(f"Ответ от модели {model_label}: {json.dumps(response, indent=2, ensure_ascii=False)}")
-
-        try:
-            message = response.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "").strip()
-        except Exception as e:
-            logger.warning(f"{model_label} — ошибка при извлечении контента: {e}")
-            continue
+        message = response.get("choices", [{}])[0].get("message", {})
+        content = message.get("content", "").strip()
 
         if content:
-            logger.info(f"{model_label} успешно дал ответ.")
             append_to_history(chat_id, "assistant", content)
             return markdown_to_html(content)
 
         reasoning = response.get("reasoning", "").strip()
         if reasoning:
-            logger.info(f"{model_label} — использовано reasoning вместо пустого content.")
             append_to_history(chat_id, "assistant", reasoning)
             return markdown_to_html(reasoning)
 
@@ -181,12 +162,11 @@ async def ask_model(chat_id: str, user_text: str) -> str:
         else:
             reset_time_str = "неизвестно"
 
-        logger.warning(f"{model_label} — превышен лимит.")
         return f"🚫 Превышен лимит бесплатных запросов к OpenRouter.\n⏳ Лимит обновится по МСК: {reset_time_str}"
 
     return "Извините, ни одна модель не смогла ответить. Пожалуйста, повторите позже."
 
-# === Обработка входящих сообщений ===
+# === Обработка сообщений ===
 async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message or not message.text:
@@ -207,7 +187,7 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_health(request):
     return web.Response(text="OK")
 
-# === Запуск бота ===
+# === Запуск ===
 async def run():
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_update))
