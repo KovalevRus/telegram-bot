@@ -69,6 +69,7 @@ def markdown_to_html(text: str) -> str:
     )
     # Удаляем <p> теги, которые Telegram не поддерживает
     html = html.replace("<p>", "").replace("</p>", "")
+    html = html.replace("<br>", "\n")
     return html
 
 # === Запрос к OpenRouter ===
