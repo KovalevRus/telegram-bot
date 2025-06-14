@@ -174,13 +174,17 @@ async def handle_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == context.bot.id
     mentioned = any(e.type in {"mention", "text_mention"} for e in message.entities or [])
-
     if is_reply_to_bot or mentioned:
         user_text = message.text
         chat_id = str(message.chat_id)
 
         logger.info(f"[{chat_id}] Запрос: {user_text}")
+
         answer = await ask_model(chat_id, user_text)
+
+        # Заменаем <br> на перенос строки
+        answer = answer.replace("<br>", "\n")
+
         await message.reply_text(answer, parse_mode=ParseMode.HTML)
 
 # === Хелсчек ===
